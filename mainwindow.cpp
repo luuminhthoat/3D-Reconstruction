@@ -2,6 +2,8 @@
 #include "ui_mainwindow.h"
 #include <QVBoxLayout>
 #include "PanStyle.h"  // Thay vì include vtkInteractorStyleTrackballCamera
+#include <vtkOBJReader.h> // Thêm thư viện để đọc file OBJ
+#include <vtkOBJImporter.h> // Thêm thư viện để import model OBJ có texture
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -13,13 +15,23 @@ MainWindow::MainWindow(QWidget* parent)
     vtkWidget->setContextMenuPolicy(Qt::NoContextMenu);
     setCentralWidget(vtkWidget);
 
-    vtkNew<vtkCylinderSource> cylinder;
-    cylinder->SetHeight(3.0);
-    cylinder->SetRadius(1.0);
-    cylinder->SetResolution(32);
+    //vtkNew<vtkCylinderSource> cylinder;
+    //cylinder->SetHeight(3.0);
+    //cylinder->SetRadius(1.0);
+    //cylinder->SetResolution(32);
 
+    //vtkNew<vtkPolyDataMapper> mapper;
+    //mapper->SetInputConnection(cylinder->GetOutputPort());
+
+    // Load file OBJ
+    vtkNew<vtkOBJReader> reader;
+    reader->SetFileName("C:/Users/ADMIN/Documents/3D-Reconstruction/FinalBaseMesh.obj");
+
+    reader->Update();
+
+    // Mapper
     vtkNew<vtkPolyDataMapper> mapper;
-    mapper->SetInputConnection(cylinder->GetOutputPort());
+    mapper->SetInputConnection(reader->GetOutputPort());
 
     vtkNew<vtkActor> actor;
     actor->SetMapper(mapper);
@@ -27,6 +39,9 @@ MainWindow::MainWindow(QWidget* parent)
     vtkNew<vtkRenderer> renderer;
     renderer->AddActor(actor);
     renderer->SetBackground(0.1, 0.2, 0.4);
+
+    // Fit camera
+    renderer->ResetCamera();
 
     vtkWidget->renderWindow()->AddRenderer(renderer);
 

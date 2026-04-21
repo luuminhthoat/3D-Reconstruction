@@ -15,6 +15,7 @@ find_package(VTK REQUIRED COMPONENTS
     RenderingOpenGL2
     GUISupportQt
     ViewsQt
+    IOGeometry
 )
 
 # 3. Khai báo executable (PHẢI ĐẶT TRƯỚC KHI GỌI target_...)
