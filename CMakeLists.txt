@@ -24,6 +24,7 @@ qt_add_executable(3D-Reconstruction
     mainwindow.cpp
     mainwindow.h
     mainwindow.ui
+    PanStyle.h PanStyle.cpp
 )
 
 # 4. Thêm include và định nghĩa cho target (SAU KHI target đã tồn tại)
