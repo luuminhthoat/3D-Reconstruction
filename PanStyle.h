@@ -2,6 +2,7 @@
 #define PANSTYLE_H
 
 #include <vtkInteractorStyleTrackballCamera.h>
+#include <vtkObjectFactory.h>
 
 class PanStyle : public vtkInteractorStyleTrackballCamera
 {
