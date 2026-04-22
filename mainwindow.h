@@ -6,12 +6,15 @@
 #include <vtkSmartPointer.h>
 #include <vtkRenderer.h>
 #include <vtkActor.h>
+#include <vector>
+#include <QProgressDialog>
+
+class QProgressBar;
+class ReconstructionPipeline;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
 QT_END_NAMESPACE
-
-class ReconstructionPipeline;
 
 class MainWindow : public QMainWindow
 {
@@ -22,20 +25,31 @@ public:
     ~MainWindow();
 
 private slots:
-    void onLoadImages();          // chọn nhiều ảnh
-    void onRunReconstruction();   // chạy pipeline
-    void onShowPointCloud();      // hiển thị point cloud đã tạo
-    void onClearPointCloud();     // xoá point cloud khỏi scene
+    void onLoad2DImages();
+    void onLoad3DImages();
+    void onLoadMultiple2DImages();
+    void onRunReconstruction();
+    void onShowPointCloud();
+    void onClearPointCloud();
 
 private:
+    void loadOBJwithMTL(const QString &objPath, const QString &mtlPath);
+    void clear3DModel();
+    void clear2DTexture();
+    void clearPointCloud();  // thêm hàm xóa point cloud
+
     Ui::MainWindow *ui;
     QVTKOpenGLNativeWidget *vtkWidget;
     vtkSmartPointer<vtkRenderer> renderer;
-    vtkSmartPointer<vtkActor> objActor;          // actor cho model OBX gốc
-    vtkSmartPointer<vtkActor> cloudActor;        // actor cho point cloud
+
+    std::vector<vtkSmartPointer<vtkActor>> modelActors;
+    vtkSmartPointer<vtkActor> texturePlaneActor;
+    vtkSmartPointer<vtkActor> cloudActor;
 
     ReconstructionPipeline *reconstruction;
     bool pointCloudVisible;
+
+    QProgressBar *progressBar;  // thanh tiến trình
 };
 
-#endif // MAINWINDOW_H
+#endif

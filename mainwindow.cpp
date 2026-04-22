@@ -7,6 +7,8 @@
 #include <QMessageBox>
 #include <QDebug>
 #include <QFileInfo>
+#include <QProgressBar>
+#include <QStatusBar>
 #include <vtkOBJImporter.h>
 #include <vtkOBJReader.h>
 #include <vtkActorCollection.h>
@@ -22,49 +24,55 @@
 #include <vtkPointData.h>
 #include <vtkProperty.h>
 #include <vtkLight.h>
+#include <vtkTexture.h>
+#include <vtkJPEGReader.h>
+#include <vtkPNGReader.h>
+#include <vtkImageReader2.h>
+#include <vtkPlaneSource.h>
+#include <vtkImageData.h>
 #include "PanStyle.h"
+#include <QTimer>
+#include <QThread>
 
-MainWindow::MainWindow(QWidget* parent)
-    : QMainWindow(parent)
-    , ui(new Ui::MainWindow)
-    , pointCloudVisible(false)
+// ------------------------------------------------------------------
+// Hàm trợ giúp
+// ------------------------------------------------------------------
+void MainWindow::clear3DModel()
 {
-    ui->setupUi(this);
+    for (auto &actor : modelActors) {
+        renderer->RemoveActor(actor);
+    }
+    modelActors.clear();
+}
 
-    vtkWidget = new QVTKOpenGLNativeWidget(this);
-    setCentralWidget(vtkWidget);
+void MainWindow::clear2DTexture()
+{
+    if (texturePlaneActor) {
+        renderer->RemoveActor(texturePlaneActor);
+        texturePlaneActor = nullptr;
+    }
+}
 
-    renderer = vtkSmartPointer<vtkRenderer>::New();
-    renderer->SetBackground(0.1, 0.2, 0.4);
-    vtkWidget->renderWindow()->AddRenderer(renderer);
+void MainWindow::clearPointCloud()
+{
+    if (cloudActor && pointCloudVisible) {
+        renderer->RemoveActor(cloudActor);
+        pointCloudVisible = false;
+        vtkWidget->renderWindow()->Render();
+    }
+}
 
-    // Thêm đèn headlight để chiếu sáng từ camera
-    vtkSmartPointer<vtkLight> headlight = vtkSmartPointer<vtkLight>::New();
-    headlight->SetLightTypeToHeadlight();
-    headlight->SetIntensity(1.5);
-    renderer->AddLight(headlight);
-
-    // Thêm các đèn phụ
-    vtkSmartPointer<vtkLight> light1 = vtkSmartPointer<vtkLight>::New();
-    light1->SetLightTypeToSceneLight();
-    light1->SetPosition(2.0, 3.0, 4.0);
-    light1->SetIntensity(1.0);
-    renderer->AddLight(light1);
-
-    vtkSmartPointer<vtkLight> light2 = vtkSmartPointer<vtkLight>::New();
-    light2->SetLightTypeToSceneLight();
-    light2->SetPosition(-2.0, 1.0, 3.0);
-    light2->SetIntensity(0.8);
-    renderer->AddLight(light2);
-
-    // Load OBJ + MTL
-    QString objPath = "C:/Users/ADMIN/Documents/3D-Reconstruction/3DModels/85-cottage_obj/cottage_obj.obj";
-    QString mtlPath = "C:/Users/ADMIN/Documents/3D-Reconstruction/3DModels/85-cottage_obj/cottage_obj.mtl";
-
+void MainWindow::loadOBJwithMTL(const QString &objPath, const QString &mtlPath)
+{
     QFileInfo objFile(objPath);
     QFileInfo mtlFile(mtlPath);
     qDebug() << "OBJ exists:" << objFile.exists();
     qDebug() << "MTL exists:" << mtlFile.exists();
+
+    if (!objFile.exists()) {
+        qWarning() << "OBJ file not found!";
+        return;
+    }
 
     vtkNew<vtkOBJImporter> importer;
     importer->SetFileName(objPath.toStdString().c_str());
@@ -79,55 +87,99 @@ MainWindow::MainWindow(QWidget* parent)
         vtkActor* actor;
         int actorCount = 0;
         while ((actor = actors->GetNextActor())) {
-            // In số polygons và màu gốc từ material
-            vtkPolyData* polyData = vtkPolyData::SafeDownCast(actor->GetMapper()->GetInput());
-            if (polyData) {
-                vtkIdType numPolys = polyData->GetNumberOfPolys();
-                qDebug() << "Actor" << actorCount << "has" << numPolys << "polygons";
-            } else {
-                qDebug() << "Actor" << actorCount << "has no poly data";
-            }
-
-            // Lấy màu đã được importer đọc từ MTL
-            double* color = actor->GetProperty()->GetColor();
-            qDebug() << "Material color from MTL (R,G,B):" << color[0] << color[1] << color[2];
-
-            // Bật lighting để màu hiển thị đúng (không ghi đè)
             actor->GetProperty()->SetLighting(true);
             actor->GetProperty()->SetInterpolationToPhong();
             actor->GetProperty()->SetAmbient(0.3);
             actor->GetProperty()->SetDiffuse(0.8);
-
             renderer->AddActor(actor);
+            modelActors.push_back(actor);
             actorCount++;
         }
         qDebug() << "Actors added from OBJ importer:" << actorCount;
-        if (actorCount == 0) {
-            // fallback...
-            vtkNew<vtkOBJReader> reader;
-            reader->SetFileName(objPath.toStdString().c_str());
-            reader->Update();
-            vtkNew<vtkPolyDataMapper> mapper;
-            mapper->SetInputConnection(reader->GetOutputPort());
-            objActor = vtkSmartPointer<vtkActor>::New();
-            objActor->SetMapper(mapper);
-            objActor->GetProperty()->SetColor(0.7, 0.7, 0.7);
-            renderer->AddActor(objActor);
-        }
     } else {
-        // fallback...
+        qWarning() << "Importer did not create a renderer. Using OBJReader fallback.";
         vtkNew<vtkOBJReader> reader;
         reader->SetFileName(objPath.toStdString().c_str());
         reader->Update();
         vtkNew<vtkPolyDataMapper> mapper;
         mapper->SetInputConnection(reader->GetOutputPort());
-        objActor = vtkSmartPointer<vtkActor>::New();
-        objActor->SetMapper(mapper);
-        objActor->GetProperty()->SetColor(0.7, 0.7, 0.7);
-        renderer->AddActor(objActor);
+        vtkSmartPointer<vtkActor> fallbackActor = vtkSmartPointer<vtkActor>::New();
+        fallbackActor->SetMapper(mapper);
+        fallbackActor->GetProperty()->SetColor(0.7, 0.7, 0.7);
+        renderer->AddActor(fallbackActor);
+        modelActors.push_back(fallbackActor);
     }
-
     renderer->ResetCamera();
+    vtkWidget->renderWindow()->Render();
+}
+
+// ------------------------------------------------------------------
+// Constructor & Destructor
+// ------------------------------------------------------------------
+MainWindow::MainWindow(QWidget* parent)
+    : QMainWindow(parent)
+    , ui(new Ui::MainWindow)
+    , pointCloudVisible(false)
+    , texturePlaneActor(nullptr)
+{
+    ui->setupUi(this);
+
+    vtkWidget = new QVTKOpenGLNativeWidget(this);
+    setCentralWidget(vtkWidget);
+
+    renderer = vtkSmartPointer<vtkRenderer>::New();
+    renderer->SetBackground(0.1, 0.2, 0.4);
+    vtkWidget->renderWindow()->AddRenderer(renderer);
+
+    // Thêm đèn chiếu sáng
+    vtkSmartPointer<vtkLight> headlight = vtkSmartPointer<vtkLight>::New();
+    headlight->SetLightTypeToHeadlight();
+    headlight->SetIntensity(1.5);
+    renderer->AddLight(headlight);
+
+    vtkSmartPointer<vtkLight> light1 = vtkSmartPointer<vtkLight>::New();
+    light1->SetLightTypeToSceneLight();
+    light1->SetPosition(2.0, 3.0, 4.0);
+    light1->SetIntensity(1.0);
+    renderer->AddLight(light1);
+
+    vtkSmartPointer<vtkLight> light2 = vtkSmartPointer<vtkLight>::New();
+    light2->SetLightTypeToSceneLight();
+    light2->SetPosition(-2.0, 1.0, 3.0);
+    light2->SetIntensity(0.8);
+    renderer->AddLight(light2);
+
+    // Thanh progress bar (thêm vào status bar)
+    progressBar = new QProgressBar(this);
+    progressBar->setVisible(false);
+    statusBar()->addWidget(progressBar);
+
+    // Toolbar
+    QToolBar *toolBar = addToolBar("Reconstruction 3d");
+    QAction *load2dAction = toolBar->addAction("1-Load 2D images");
+    QAction *load3dAction = toolBar->addAction("1-Load 3D images");
+    QAction *loadAction = toolBar->addAction("2-Load multiple 2D images");
+    QAction *reconAction = toolBar->addAction("2-Run Reconstruction");
+    QAction *showAction = toolBar->addAction("2-Show Point Cloud");
+    QAction *clearAction = toolBar->addAction("2-Clear Cloud");
+
+    connect(load2dAction, &QAction::triggered, this, &MainWindow::onLoad2DImages);
+    connect(load3dAction, &QAction::triggered, this, &MainWindow::onLoad3DImages);
+    connect(loadAction, &QAction::triggered, this, &MainWindow::onLoadMultiple2DImages);
+    connect(reconAction, &QAction::triggered, this, &MainWindow::onRunReconstruction);
+    connect(showAction, &QAction::triggered, this, &MainWindow::onShowPointCloud);
+    connect(clearAction, &QAction::triggered, this, &MainWindow::onClearPointCloud);
+
+    reconstruction = new ReconstructionPipeline();
+
+    // Mặc định load cube (nếu có) - nhưng không bắt buộc, có thể để trống
+    QString objPath = "C:/Users/ADMIN/Documents/3D-Reconstruction/3DModels/85-cottage_obj/cube.obj";
+    QString mtlPath = "C:/Users/ADMIN/Documents/3D-Reconstruction/3DModels/85-cottage_obj/cube.mtl";
+    if (QFileInfo::exists(objPath)) {
+        loadOBJwithMTL(objPath, mtlPath);
+    } else {
+        qDebug() << "Default cube not found, starting with empty scene.";
+    }
 
     // Interactor style
     vtkRenderWindowInteractor* interactor = vtkWidget->renderWindow()->GetInteractor();
@@ -140,19 +192,7 @@ MainWindow::MainWindow(QWidget* parent)
     interactor->SetInteractorStyle(style);
     interactor->Initialize();
 
-    // Toolbar
-    QToolBar *toolBar = addToolBar("Reconstruction");
-    QAction *loadAction = toolBar->addAction("Load Images");
-    QAction *reconAction = toolBar->addAction("Run Reconstruction");
-    QAction *showAction = toolBar->addAction("Show Point Cloud");
-    QAction *clearAction = toolBar->addAction("Clear Cloud");
-
-    connect(loadAction, &QAction::triggered, this, &MainWindow::onLoadImages);
-    connect(reconAction, &QAction::triggered, this, &MainWindow::onRunReconstruction);
-    connect(showAction, &QAction::triggered, this, &MainWindow::onShowPointCloud);
-    connect(clearAction, &QAction::triggered, this, &MainWindow::onClearPointCloud);
-
-    reconstruction = new ReconstructionPipeline();
+    renderer->ResetCamera();
 }
 
 MainWindow::~MainWindow()
@@ -161,22 +201,152 @@ MainWindow::~MainWindow()
     delete ui;
 }
 
-void MainWindow::onLoadImages()
+// ------------------------------------------------------------------
+// Slots
+// ------------------------------------------------------------------
+void MainWindow::onLoad2DImages()
+{
+    QString fileName = QFileDialog::getOpenFileName(this, "Select 2D Image", "",
+                                                    "Images (*.png *.jpg *.jpeg *.bmp)");
+    if (fileName.isEmpty()) return;
+
+    // Xóa tất cả các đối tượng hiện có: 3D model, point cloud, texture cũ
+    clear3DModel();
+    clearPointCloud();
+    clear2DTexture();
+
+    // Tạo texture plane mới
+    vtkSmartPointer<vtkImageReader2> reader;
+    if (fileName.endsWith(".png", Qt::CaseInsensitive)) {
+        reader = vtkSmartPointer<vtkPNGReader>::New();
+    } else {
+        reader = vtkSmartPointer<vtkJPEGReader>::New();
+    }
+    reader->SetFileName(fileName.toStdString().c_str());
+    reader->Update();
+
+    vtkImageData* imageData = reader->GetOutput();
+    int* dims = imageData->GetDimensions();
+    int width = dims[0];
+    int height = dims[1];
+    double aspect = (double)width / (double)height;
+
+    double planeWidth = aspect;
+    double planeHeight = 1.0;
+    vtkNew<vtkPlaneSource> plane;
+    plane->SetOrigin(-planeWidth/2.0, -planeHeight/2.0, 0.0);
+    plane->SetPoint1( planeWidth/2.0, -planeHeight/2.0, 0.0);
+    plane->SetPoint2(-planeWidth/2.0,  planeHeight/2.0, 0.0);
+    plane->SetResolution(1, 1);
+    plane->Update();
+
+    vtkNew<vtkTexture> texture;
+    texture->SetInputData(imageData);
+    texture->InterpolateOn();
+
+    vtkNew<vtkPolyDataMapper> planeMapper;
+    planeMapper->SetInputConnection(plane->GetOutputPort());
+
+    texturePlaneActor = vtkSmartPointer<vtkActor>::New();
+    texturePlaneActor->SetMapper(planeMapper);
+    texturePlaneActor->SetTexture(texture);
+    texturePlaneActor->GetProperty()->SetLighting(false);
+
+    renderer->AddActor(texturePlaneActor);
+    renderer->ResetCamera();
+    vtkWidget->renderWindow()->Render();
+
+    QMessageBox::information(this, "Info", QString("Đã hiển thị ảnh: %1").arg(fileName));
+}
+
+// onLoad3DImages
+void MainWindow::onLoad3DImages()
+{
+    QString objFileName = QFileDialog::getOpenFileName(this, "Select OBJ file", "", "OBJ Files (*.obj)");
+    if (objFileName.isEmpty()) return;
+
+    QFileInfo objInfo(objFileName);
+    QString mtlFileName = objInfo.path() + "/" + objInfo.completeBaseName() + ".mtl";
+
+    progressBar->setRange(0, 100);
+    progressBar->setValue(0);
+    progressBar->setVisible(true);
+    statusBar()->showMessage("Đang tải mô hình 3D...");
+    QApplication::processEvents();
+
+    QTimer *timer = new QTimer(this);
+    int current = 0;
+    connect(timer, &QTimer::timeout, [&]() {
+        if (current < 90) {
+            current += 5;
+            progressBar->setValue(current);
+        }
+        QApplication::processEvents();
+    });
+    timer->start(50);
+
+    clear3DModel();
+    clearPointCloud();
+    clear2DTexture();
+    loadOBJwithMTL(objFileName, mtlFileName);
+
+    timer->stop();
+    delete timer;
+    progressBar->setValue(100);
+    QApplication::processEvents();
+    QThread::msleep(200);
+    progressBar->setVisible(false);
+    statusBar()->clearMessage();
+
+    QMessageBox::information(this, "Info", QString("Đã tải mô hình: %1").arg(objFileName));
+}
+
+void MainWindow::onLoadMultiple2DImages()
 {
     QStringList files = QFileDialog::getOpenFileNames(this, "Select Images", "",
                                                       "Images (*.png *.jpg *.bmp)");
     if (files.isEmpty()) return;
 
+    // Không xóa scene, vẫn giữ mô hình hiện tại
     std::vector<QString> paths;
     for (const auto &f : files) paths.push_back(f);
     reconstruction->setImages(paths);
-    QMessageBox::information(this, "Info", QString("Đã tải %1 ảnh").arg(paths.size()));
+    QMessageBox::information(this, "Info", QString("Đã tải %1 ảnh cho reconstruction").arg(paths.size()));
 }
 
+// onRunReconstruction
 void MainWindow::onRunReconstruction()
 {
-    if (!reconstruction->reconstruct()) {
-        QMessageBox::warning(this, "Error", "Reconstruction thất bại! Kiểm tra số lượng ảnh hoặc chất lượng features.");
+    progressBar->setRange(0, 100);
+    progressBar->setValue(0);
+    progressBar->setVisible(true);
+    statusBar()->showMessage("Đang tái tạo 3D...");
+    QApplication::processEvents();
+
+    QTimer *timer = new QTimer(this);
+    int current = 0;
+    connect(timer, &QTimer::timeout, [&]() {
+        if (current < 95) {
+            current += 1;
+            progressBar->setValue(current);
+        }
+        QApplication::processEvents();
+    });
+    timer->start(30);
+
+    bool success = reconstruction->reconstruct();
+
+    timer->stop();
+    delete timer;
+    progressBar->setValue(100);
+    QApplication::processEvents();
+    QThread::msleep(200);
+
+    progressBar->setVisible(false);
+    statusBar()->clearMessage();
+
+    if (!success) {
+        QMessageBox::warning(this, "Error", "Reconstruction thất bại!");
         return;
     }
     QMessageBox::information(this, "Success", "Point cloud đã được tạo.");
@@ -193,7 +363,9 @@ void MainWindow::onShowPointCloud()
 
     qDebug() << "Showing point cloud: points=" << pts.size() << ", colors=" << colors.size();
 
-    onClearPointCloud();
+    // Xóa point cloud cũ nếu có
+    clear3DModel();
+    clearPointCloud();
 
     vtkNew<vtkPoints> vtkPoints;
     vtkNew<vtkCellArray> vertices;
@@ -236,9 +408,5 @@ void MainWindow::onShowPointCloud()
 
 void MainWindow::onClearPointCloud()
 {
-    if (cloudActor && pointCloudVisible) {
-        renderer->RemoveActor(cloudActor);
-        vtkWidget->renderWindow()->Render();
-        pointCloudVisible = false;
-    }
+    clearPointCloud();
 }
