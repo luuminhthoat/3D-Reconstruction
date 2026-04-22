@@ -8,37 +8,27 @@
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <cmath>
+#include <set>
+#include <algorithm>
 
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------------
 // Constructor / Destructor
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------------
 ReconstructionPipeline::ReconstructionPipeline()
 {
-    detector = cv::SIFT::create(
-        2000,   // tăng keypoints
-        3,
-        0.02,   // nhạy hơn
-        10,
-        1.6
-        );
-
+    detector = cv::SIFT::create(0, 3, 0.04, 10, 1.6);
     K_fallback = (cv::Mat_<double>(3,3)
                       << 1520.4, 0.0,    302.32,
                   0.0,    1525.9, 246.87,
                   0.0,    0.0,    1.0);
-
     distCoeffs = cv::Mat::zeros(4, 1, CV_64F);
 }
 
 ReconstructionPipeline::~ReconstructionPipeline() {}
 
-// ─────────────────────────────────────────────
-// loadCameraParams
-// Đọc file templeR_par.txt (Middlebury format):
-//   Dòng 1: số lượng ảnh (47)
-//   Mỗi dòng tiếp: imageName k11 k12 ... k33 r11 ... r33 t1 t2 t3
-//   Tổng 22 token mỗi dòng dữ liệu
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------------
+// loadCameraParams (giữ nguyên)
+// ------------------------------------------------------------------
 bool ReconstructionPipeline::loadCameraParams(const QString &paramsFilePath)
 {
     QFile file(paramsFilePath);
@@ -46,11 +36,8 @@ bool ReconstructionPipeline::loadCameraParams(const QString &paramsFilePath)
         qWarning() << "Không mở được file params:" << paramsFilePath;
         return false;
     }
-
     camParams.clear();
     QTextStream in(&file);
-
-    // Dòng đầu tiên: số lượng ảnh
     QString firstLine = in.readLine().trimmed();
     bool ok = false;
     int numImages = firstLine.toInt(&ok);
@@ -60,75 +47,53 @@ bool ReconstructionPipeline::loadCameraParams(const QString &paramsFilePath)
         return false;
     }
     qDebug() << "File params khai báo" << numImages << "camera(s)";
-
-    // Đọc từng dòng camera
     while (!in.atEnd()) {
         QString line = in.readLine().trimmed();
         if (line.isEmpty()) continue;
-
-        // Tách theo khoảng trắng
-        QStringList tok = line.split(QRegularExpression("\\s+"),
-                                     Qt::SkipEmptyParts);
-        // Cần đúng 22 token: 1 tên + 9 K + 9 R + 3 t
+        QStringList tok = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
         if (tok.size() < 22) {
             qWarning() << "Dòng không đủ 22 token, bỏ qua:" << line.left(60);
             continue;
         }
-
         CameraParams cp;
         cp.imageName = tok[0];
-
-        // --- K (3×3) ---
         cp.K = cv::Mat(3, 3, CV_64F);
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)
                 cp.K.at<double>(r, c) = tok[1 + r*3 + c].toDouble();
-
-        // --- R (3×3) ---
         cp.R = cv::Mat(3, 3, CV_64F);
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)
                 cp.R.at<double>(r, c) = tok[10 + r*3 + c].toDouble();
-
-        // --- t (3×1) ---
         cp.t = cv::Mat(3, 1, CV_64F);
         for (int r = 0; r < 3; ++r)
             cp.t.at<double>(r, 0) = tok[19 + r].toDouble();
-
-        // --- P = K * [R | t] (tính sẵn, dùng nhiều lần) ---
         cv::Mat RT;
-        cv::hconcat(cp.R, cp.t, RT);   // 3×4
-        cp.P = cp.K * RT;              // 3×4
-
+        cv::hconcat(cp.R, cp.t, RT);
+        cp.P = cp.K * RT;
         camParams.push_back(cp);
     }
-
     file.close();
-
     if ((int)camParams.size() != numImages) {
         qWarning() << "Số camera đọc được" << camParams.size()
             << "≠ khai báo" << numImages;
     }
-
     hasGroundTruthParams = !camParams.empty();
     qDebug() << "Đã load" << camParams.size() << "camera params thành công";
-
-    // In thông số camera đầu tiên để kiểm tra
     if (!camParams.empty()) {
         const auto &c0 = camParams[0];
         qDebug() << "Camera[0]:" << c0.imageName;
         qDebug() << "  K: fx=" << c0.K.at<double>(0,0)
-                 << "fy="      << c0.K.at<double>(1,1)
-                 << "cx="      << c0.K.at<double>(0,2)
-                 << "cy="      << c0.K.at<double>(1,2);
+                 << "fy=" << c0.K.at<double>(1,1)
+                 << "cx=" << c0.K.at<double>(0,2)
+                 << "cy=" << c0.K.at<double>(1,2);
     }
-
     return true;
 }
 
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------------
 // setImages
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------------
 void ReconstructionPipeline::setImages(const std::vector<QString> &imagePaths)
 {
     images.clear();
@@ -142,206 +107,9 @@ void ReconstructionPipeline::setImages(const std::vector<QString> &imagePaths)
     qDebug() << "Loaded" << images.size() << "images";
 }
 
-// ─────────────────────────────────────────────
-// reconstruct
-// ─────────────────────────────────────────────
-bool ReconstructionPipeline::reconstruct()
-{
-    if (images.size() < 2) {
-        qWarning() << "Cần ít nhất 2 ảnh!";
-        return false;
-    }
-
-    points3D.clear();
-    colors.clear();
-
-    // Bước 1: Trích xuất features cho TẤT CẢ ảnh
-    keypoints.resize(images.size());
-    descriptors.resize(images.size());
-    for (size_t i = 0; i < images.size(); ++i) {
-        extractFeatures(i);
-        qDebug() << "Image" << i << "keypoints:" << keypoints[i].size();
-    }
-
-    // ═══════════════════════════════════════════════
-    // CASE A: Có ground-truth params từ *_par.txt
-    //   → Dùng trực tiếp P = K*[R|t] đã tính sẵn
-    //   → Không bị drift, scale chính xác
-    // ═══════════════════════════════════════════════
-    if (hasGroundTruthParams && camParams.size() >= images.size())
-    {
-        qDebug() << "=== Chế độ: GROUND-TRUTH camera params ===";
-
-        // Bounding box của TempleRing (từ README):
-        //   min: (-0.023121, -0.038009, -0.091940)
-        //   max: ( 0.078626,  0.121636, -0.017395)
-        // Dùng để lọc outlier nằm ngoài bbox mở rộng 3×
-        const float xMin = -0.10f, xMax = 0.20f;
-        const float yMin = -0.15f, yMax = 0.25f;
-        const float zMin = -0.30f, zMax = 0.10f;
-
-        for (size_t i = 0; i < images.size(); ++i)
-        {
-            for (int offset = 1; offset <= 3; offset++)
-            {
-                int j = i + offset;
-                if (j >= images.size()) continue;
-
-                std::vector<cv::DMatch> matches;
-                matchFeatures(i, j, matches);
-
-                if ((int)matches.size() < 30) continue;
-
-                std::vector<cv::Point2f> ptsA, ptsB;
-                for (const auto &m : matches) {
-                    ptsA.push_back(keypoints[i][m.queryIdx].pt);
-                    ptsB.push_back(keypoints[j][m.trainIdx].pt);
-                }
-
-                std::vector<cv::Point3f> newPts;
-                doTriangulate(camParams[i].P, camParams[j].P,
-                              ptsA, ptsB, newPts);
-
-                int kept = 0;
-
-                for (size_t k = 0; k < newPts.size() && k < matches.size(); ++k)
-                {
-                    const auto &pt = newPts[k];
-
-                    // Bounding box
-                    if (pt.x < -0.1f || pt.x > 0.2f) continue;
-                    if (pt.y < -0.15f || pt.y > 0.25f) continue;
-                    if (pt.z < -0.3f || pt.z > 0.1f) continue;
-
-                    // Depth check
-                    cv::Mat pw = (cv::Mat_<double>(3,1) << pt.x, pt.y, pt.z);
-
-                    cv::Mat depth_i_mat = cv::Mat(camParams[i].R.row(2)) * pw;
-                    cv::Mat depth_j_mat = cv::Mat(camParams[j].R.row(2)) * pw;
-
-                    double z_i = depth_i_mat.at<double>(0,0)
-                                 + camParams[i].t.at<double>(2);
-
-                    double z_j = depth_j_mat.at<double>(0,0)
-                                 + camParams[j].t.at<double>(2);
-
-                    if (z_i <= 0 || z_j <= 0) continue;
-
-                    // Reprojection error
-                    cv::Mat pt4 = (cv::Mat_<double>(4,1)
-                                       << pt.x, pt.y, pt.z, 1.0);
-
-                    cv::Mat proj_i = camParams[i].P * pt4;
-                    cv::Mat proj_j = camParams[j].P * pt4;
-
-                    cv::Point2f p_i(
-                        proj_i.at<double>(0)/proj_i.at<double>(2),
-                        proj_i.at<double>(1)/proj_i.at<double>(2));
-
-                    cv::Point2f p_j(
-                        proj_j.at<double>(0)/proj_j.at<double>(2),
-                        proj_j.at<double>(1)/proj_j.at<double>(2));
-
-                    double err =
-                        cv::norm(p_i - ptsA[k]) +
-                        cv::norm(p_j - ptsB[k]);
-
-                    if (err > 2.0) continue;
-
-                    // Color
-                    auto kp = keypoints[i][matches[k].queryIdx].pt;
-                    int x = cvRound(kp.x);
-                    int y = cvRound(kp.y);
-
-                    cv::Vec3b color(128,128,128);
-                    if (x>=0 && y>=0 && x<images[i].cols && y<images[i].rows)
-                        color = images[i].at<cv::Vec3b>(y,x);
-
-                    points3D.push_back(pt);
-                    colors.push_back(color);
-                    kept++;
-                }
-
-                qDebug() << "Pair" << i << "-" << j
-                         << "matches=" << matches.size()
-                         << "kept=" << kept;
-            }
-        }
-    }
-    // ═══════════════════════════════════════════════
-    // CASE B: Không có params → ước lượng pose
-    // ═══════════════════════════════════════════════
-    else
-    {
-        qDebug() << "=== Chế độ: ESTIMATED pose (không có file params) ===";
-        qWarning() << "Khuyến nghị: đặt file templeR_par.txt cùng thư mục ảnh";
-
-        cv::Mat R_accum = cv::Mat::eye(3, 3, CV_64F);
-        cv::Mat t_accum = cv::Mat::zeros(3, 1, CV_64F);
-
-        for (size_t i = 0; i + 1 < images.size(); ++i)
-        {
-            std::vector<cv::DMatch> matches;
-            matchFeatures(i, i + 1, matches);
-
-            if ((int)matches.size() < 100) {
-                qWarning() << "Cặp" << i << "-" << (i+1)
-                           << ": không đủ matches (" << matches.size() << ")";
-                continue;
-            }
-
-            std::vector<cv::Point2f> ptsA, ptsB;
-            for (const auto &m : matches) {
-                ptsA.push_back(keypoints[i  ][m.queryIdx].pt);
-                ptsB.push_back(keypoints[i+1][m.trainIdx].pt);
-            }
-
-            cv::Mat R_rel, t_rel;
-            if (!estimatePoseFromMatches(ptsA, ptsB, R_rel, t_rel)) {
-                qWarning() << "Không estimate được pose cặp" << i << "-" << (i+1);
-                continue;
-            }
-
-            cv::Mat R_global = R_accum * R_rel;
-            cv::Mat t_global = R_accum * t_rel + t_accum;
-
-            cv::Mat RT_i, RT_next;
-            cv::hconcat(R_accum,  t_accum,  RT_i);
-            cv::hconcat(R_global, t_global, RT_next);
-            cv::Mat P_i    = K_fallback * RT_i;
-            cv::Mat P_next = K_fallback * RT_next;
-
-            std::vector<cv::Point3f> newPts;
-            doTriangulate(P_i, P_next, ptsA, ptsB, newPts);
-
-            int kept = 0;
-            for (size_t j = 0; j < newPts.size() && j < matches.size(); ++j) {
-                if (newPts[j].z <= 0 || newPts[j].z > 50.f) continue;
-                points3D.push_back(newPts[j]);
-                cv::Point2f kpPt = keypoints[i][matches[j].queryIdx].pt;
-                int x = cvRound(kpPt.x), y = cvRound(kpPt.y);
-                if (x >= 0 && y >= 0 && x < images[i].cols && y < images[i].rows)
-                    colors.push_back(images[i].at<cv::Vec3b>(y, x));
-                else
-                    colors.push_back(cv::Vec3b(128, 128, 128));
-                ++kept;
-            }
-
-            qDebug() << "Cặp" << i << "-" << (i+1)
-                     << ": kept=" << kept;
-
-            R_accum = R_global.clone();
-            t_accum = t_global.clone();
-        }
-    }
-
-    qDebug() << "=== Tổng điểm 3D:" << points3D.size() << "===";
-    return !points3D.empty();
-}
-
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------------
 // extractFeatures
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------------
 void ReconstructionPipeline::extractFeatures(int idx)
 {
     cv::Mat gray;
@@ -350,53 +118,41 @@ void ReconstructionPipeline::extractFeatures(int idx)
                                keypoints[idx], descriptors[idx]);
 }
 
-// ─────────────────────────────────────────────
-// matchFeatures  (Lowe's ratio test 0.75)
-// ─────────────────────────────────────────────
-void ReconstructionPipeline::matchFeatures(
-    int idx1, int idx2,
-    std::vector<cv::DMatch> &goodMatches)
+// ------------------------------------------------------------------
+// matchFeatures (Lowe's ratio test 0.75 + cross-check)
+// ------------------------------------------------------------------
+void ReconstructionPipeline::matchFeatures(int idx1, int idx2,
+                                           std::vector<cv::DMatch> &goodMatches)
 {
     cv::Mat d1 = descriptors[idx1], d2 = descriptors[idx2];
     if (d1.type() != CV_32F) d1.convertTo(d1, CV_32F);
     if (d2.type() != CV_32F) d2.convertTo(d2, CV_32F);
-
     cv::FlannBasedMatcher matcher;
-
-    std::vector<std::vector<cv::DMatch>> knnMatches;
-    matcher.knnMatch(d1, d2, knnMatches, 2);
-
-    std::vector<cv::DMatch> temp;
-    for (auto &knn : knnMatches) {
-        if (knn.size() == 2 && knn[0].distance < 0.75f * knn[1].distance)
-            temp.push_back(knn[0]);
-    }
-
-    // 🔥 RANSAC filter
-    std::vector<cv::Point2f> pts1, pts2;
-    for (auto &m : temp) {
-        pts1.push_back(keypoints[idx1][m.queryIdx].pt);
-        pts2.push_back(keypoints[idx2][m.trainIdx].pt);
-    }
-
-    if (pts1.size() >= 8) {
-        std::vector<uchar> mask;
-        cv::findFundamentalMat(pts1, pts2,
-                               cv::FM_RANSAC,
-                               1.0, 0.99, mask);
-
-        goodMatches.clear();
-        for (size_t i = 0; i < mask.size(); i++) {
-            if (mask[i]) goodMatches.push_back(temp[i]);
+    std::vector<std::vector<cv::DMatch>> knn1, knn2;
+    matcher.knnMatch(d1, d2, knn1, 2);
+    matcher.knnMatch(d2, d1, knn2, 2);
+    std::set<int> goodIndices1, goodIndices2;
+    for (size_t i = 0; i < knn1.size(); ++i) {
+        if (knn1[i].size() == 2 && knn1[i][0].distance < 0.75f * knn1[i][1].distance) {
+            goodIndices1.insert(i);
         }
-    } else {
-        goodMatches = temp;
+    }
+    for (size_t i = 0; i < knn2.size(); ++i) {
+        if (knn2[i].size() == 2 && knn2[i][0].distance < 0.75f * knn2[i][1].distance) {
+            goodIndices2.insert(knn2[i][0].trainIdx);
+        }
+    }
+    goodMatches.clear();
+    for (size_t i = 0; i < knn1.size(); ++i) {
+        if (goodIndices1.count(i) && goodIndices2.count(knn1[i][0].trainIdx)) {
+            goodMatches.push_back(knn1[i][0]);
+        }
     }
 }
 
-// ─────────────────────────────────────────────
-// estimatePoseFromMatches  (dùng cho CASE B)
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------------
+// estimatePoseFromMatches (dùng essential matrix)
+// ------------------------------------------------------------------
 bool ReconstructionPipeline::estimatePoseFromMatches(
     const std::vector<cv::Point2f> &pts1,
     const std::vector<cv::Point2f> &pts2,
@@ -411,9 +167,9 @@ bool ReconstructionPipeline::estimatePoseFromMatches(
     return (inliers > 20);
 }
 
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------------
 // doTriangulate
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------------
 void ReconstructionPipeline::doTriangulate(
     const cv::Mat &P0, const cv::Mat &P1,
     const std::vector<cv::Point2f> &pts0,
@@ -424,24 +180,312 @@ void ReconstructionPipeline::doTriangulate(
     cv::triangulatePoints(P0, P1, pts0, pts1, pts4D);
     outPts.clear();
     outPts.reserve(pts4D.cols);
-
     if (pts4D.type() != CV_64F)
         pts4D.convertTo(pts4D, CV_64F);
-
     for (int i = 0; i < pts4D.cols; ++i) {
         double w = pts4D.at<double>(3, i);
-        if (std::abs(w) < 1e-9) continue;  // tránh chia cho 0
+        if (std::abs(w) < 1e-9) continue;
         outPts.push_back(cv::Point3f(
             (float)(pts4D.at<double>(0, i) / w),
             (float)(pts4D.at<double>(1, i) / w),
-            (float)(pts4D.at<double>(2, i) / w)
-            ));
+            (float)(pts4D.at<double>(2, i) / w)));
     }
 }
 
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------------
+// computeReprojectionError
+// ------------------------------------------------------------------
+double ReconstructionPipeline::computeReprojectionError(
+    const cv::Mat &P, const cv::Point3f &pt3d, const cv::Point2f &pt2d)
+{
+    cv::Mat pt4d = (cv::Mat_<double>(4,1) << pt3d.x, pt3d.y, pt3d.z, 1.0);
+    cv::Mat proj = P * pt4d;
+    double inv_w = 1.0 / proj.at<double>(2);
+    double u = proj.at<double>(0) * inv_w;
+    double v = proj.at<double>(1) * inv_w;
+    double dx = u - pt2d.x;
+    double dy = v - pt2d.y;
+    return std::sqrt(dx*dx + dy*dy);
+}
+
+// ------------------------------------------------------------------
+// filterOutliersByDensity
+// ------------------------------------------------------------------
+void ReconstructionPipeline::filterOutliersByDensity(float radius, int minNeighbors)
+{
+    if (points3D.empty()) return;
+    std::vector<bool> keep(points3D.size(), false);
+    for (size_t i = 0; i < points3D.size(); ++i) {
+        int neighbors = 0;
+        for (size_t j = 0; j < points3D.size(); ++j) {
+            if (i == j) continue;
+            float dx = points3D[i].x - points3D[j].x;
+            float dy = points3D[i].y - points3D[j].y;
+            float dz = points3D[i].z - points3D[j].z;
+            float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+            if (dist < radius) ++neighbors;
+        }
+        if (neighbors >= minNeighbors) keep[i] = true;
+    }
+    std::vector<cv::Point3f> newPts;
+    std::vector<cv::Vec3b> newColors;
+    for (size_t i = 0; i < points3D.size(); ++i) {
+        if (keep[i]) {
+            newPts.push_back(points3D[i]);
+            newColors.push_back(colors[i]);
+        }
+    }
+    qDebug() << "Lọc density: giữ lại" << newPts.size() << "/" << points3D.size();
+    points3D.swap(newPts);
+    colors.swap(newColors);
+}
+
+// ------------------------------------------------------------------
+// reconstructWithGroundTruth
+// ------------------------------------------------------------------
+bool ReconstructionPipeline::reconstructWithGroundTruth()
+{
+    qDebug() << "=== Chế độ: GROUND-TRUTH camera params ===";
+    const float xMin = -0.10f, xMax = 0.20f;
+    const float yMin = -0.15f, yMax = 0.25f;
+    const float zMin = -0.30f, zMax = 0.10f;
+
+    for (size_t i = 0; i < images.size(); ++i) {
+        for (size_t j = i+1; j < images.size(); ++j) {
+            std::vector<cv::DMatch> matches;
+            matchFeatures(i, j, matches);
+            if (matches.size() < 50) continue;
+
+            std::vector<cv::Point2f> pts_i, pts_j;
+            pts_i.reserve(matches.size());
+            pts_j.reserve(matches.size());
+            for (const auto &m : matches) {
+                pts_i.push_back(keypoints[i][m.queryIdx].pt);
+                pts_j.push_back(keypoints[j][m.trainIdx].pt);
+            }
+
+            std::vector<cv::Point3f> newPts;
+            doTriangulate(camParams[i].P, camParams[j].P, pts_i, pts_j, newPts);
+
+            int kept = 0;
+            for (size_t k = 0; k < newPts.size() && k < matches.size(); ++k) {
+                const cv::Point3f &pt = newPts[k];
+                if (pt.x < xMin || pt.x > xMax) continue;
+                if (pt.y < yMin || pt.y > yMax) continue;
+                if (pt.z < zMin || pt.z > zMax) continue;
+
+                cv::Mat pw = (cv::Mat_<double>(3,1) << pt.x, pt.y, pt.z);
+                cv::Mat depth_i = cv::Mat(camParams[i].R.row(2)) * pw;
+                cv::Mat depth_j = cv::Mat(camParams[j].R.row(2)) * pw;
+                double z_i = depth_i.at<double>(0,0) + camParams[i].t.at<double>(2);
+                double z_j = depth_j.at<double>(0,0) + camParams[j].t.at<double>(2);
+                if (z_i <= 0 || z_j <= 0) continue;
+
+                double err_i = computeReprojectionError(camParams[i].P, pt, pts_i[k]);
+                double err_j = computeReprojectionError(camParams[j].P, pt, pts_j[k]);
+                if (err_i > 2.0 || err_j > 2.0) continue;
+
+                cv::Point2f kpPt = keypoints[i][matches[k].queryIdx].pt;
+                int x = cvRound(kpPt.x), y = cvRound(kpPt.y);
+                cv::Vec3b color(128,128,128);
+                if (x>=0 && y>=0 && x<images[i].cols && y<images[i].rows)
+                    color = images[i].at<cv::Vec3b>(y, x);
+
+                points3D.push_back(pt);
+                colors.push_back(color);
+                ++kept;
+            }
+            qDebug() << "Cặp" << i << "-" << j << "matches=" << matches.size()
+                     << "triangulated=" << newPts.size() << "kept=" << kept;
+        }
+    }
+    filterOutliersByDensity(0.02f, 3);
+    qDebug() << "=== Tổng điểm 3D (ground truth):" << points3D.size() << "===";
+    return !points3D.empty();
+}
+
+// ------------------------------------------------------------------
+// reconstructWithEstimatedPose
+// ------------------------------------------------------------------
+bool ReconstructionPipeline::reconstructWithEstimatedPose()
+{
+    qDebug() << "=== Chế độ: ESTIMATED pose ===";
+    // Chọn cặp cơ sở tốt nhất
+    int best_i = 0, best_j = 1;
+    size_t bestMatches = 0;
+    for (size_t i = 0; i < images.size(); ++i) {
+        for (size_t j = i+1; j < images.size(); ++j) {
+            std::vector<cv::DMatch> tmp;
+            matchFeatures(i, j, tmp);
+            if (tmp.size() > bestMatches) {
+                bestMatches = tmp.size();
+                best_i = i;
+                best_j = j;
+            }
+        }
+    }
+    if (bestMatches < 100) {
+        qWarning() << "Không tìm thấy cặp ảnh cơ sở đủ tốt!";
+        return false;
+    }
+    qDebug() << "Cặp cơ sở:" << best_i << "-" << best_j << "matches=" << bestMatches;
+
+    std::vector<cv::DMatch> baseMatches;
+    matchFeatures(best_i, best_j, baseMatches);
+    std::vector<cv::Point2f> pts_i, pts_j;
+    for (const auto &m : baseMatches) {
+        pts_i.push_back(keypoints[best_i][m.queryIdx].pt);
+        pts_j.push_back(keypoints[best_j][m.trainIdx].pt);
+    }
+
+    cv::Mat R, t;
+    if (!estimatePoseFromMatches(pts_i, pts_j, R, t)) {
+        qWarning() << "Không thể estimate pose cho cặp cơ sở";
+        return false;
+    }
+
+    cv::Mat P0 = K_fallback * cv::Mat::eye(3,4,CV_64F);
+    cv::Mat RT;
+    cv::hconcat(R, t, RT);
+    cv::Mat P1 = K_fallback * RT;
+
+    std::vector<cv::Point3f> basePoints3D;
+    doTriangulate(P0, P1, pts_i, pts_j, basePoints3D);
+
+    struct Point3DCorr {
+        cv::Point3f pt;
+        int idx_i, idx_j;
+    };
+    std::vector<Point3DCorr> baseCorr;
+    for (size_t k = 0; k < basePoints3D.size() && k < baseMatches.size(); ++k) {
+        if (basePoints3D[k].z > 0.01f && basePoints3D[k].z < 10.0f) {
+            baseCorr.push_back({basePoints3D[k], baseMatches[k].queryIdx, baseMatches[k].trainIdx});
+        }
+    }
+    qDebug() << "Base triangulated points (filtered):" << baseCorr.size();
+
+    points3D.clear();
+    colors.clear();
+    for (const auto &corr : baseCorr) {
+        points3D.push_back(corr.pt);
+        cv::Point2f kpPt = keypoints[best_i][corr.idx_i].pt;
+        int x = cvRound(kpPt.x), y = cvRound(kpPt.y);
+        cv::Vec3b color(128,128,128);
+        if (x>=0 && y>=0 && x<images[best_i].cols && y<images[best_i].rows)
+            color = images[best_i].at<cv::Vec3b>(y, x);
+        colors.push_back(color);
+    }
+
+    std::vector<cv::Mat> poses_R, poses_t;
+    std::vector<int> pose_img_indices;
+    poses_R.push_back(cv::Mat::eye(3,3,CV_64F));
+    poses_t.push_back(cv::Mat::zeros(3,1,CV_64F));
+    pose_img_indices.push_back(best_i);
+    poses_R.push_back(R.clone());
+    poses_t.push_back(t.clone());
+    pose_img_indices.push_back(best_j);
+
+    // Bổ sung các ảnh còn lại
+    for (size_t idx = 0; idx < images.size(); ++idx) {
+        if (idx == best_i || idx == best_j) continue;
+        int bestRef = -1;
+        size_t maxMatches = 0;
+        for (size_t r = 0; r < pose_img_indices.size(); ++r) {
+            std::vector<cv::DMatch> tmp;
+            matchFeatures(idx, pose_img_indices[r], tmp);
+            if (tmp.size() > maxMatches) {
+                maxMatches = tmp.size();
+                bestRef = r;
+            }
+        }
+        if (bestRef == -1 || maxMatches < 50) {
+            qDebug() << "Bỏ qua ảnh" << idx << "do không đủ matches";
+            continue;
+        }
+
+        std::vector<cv::DMatch> matches;
+        matchFeatures(idx, pose_img_indices[bestRef], matches);
+        std::vector<cv::Point2f> pts_cur, pts_ref;
+        for (const auto &m : matches) {
+            pts_cur.push_back(keypoints[idx][m.queryIdx].pt);
+            pts_ref.push_back(keypoints[pose_img_indices[bestRef]][m.trainIdx].pt);
+        }
+
+        cv::Mat R_rel, t_rel;
+        if (!estimatePoseFromMatches(pts_cur, pts_ref, R_rel, t_rel)) {
+            qDebug() << "Không thể estimate pose cho ảnh" << idx;
+            continue;
+        }
+
+        cv::Mat R_abs = poses_R[bestRef] * R_rel;
+        cv::Mat t_abs = poses_R[bestRef] * t_rel + poses_t[bestRef];
+
+        poses_R.push_back(R_abs.clone());
+        poses_t.push_back(t_abs.clone());
+        pose_img_indices.push_back(idx);
+
+        cv::Mat RT_ref, RT_cur;
+        cv::hconcat(poses_R[bestRef], poses_t[bestRef], RT_ref);
+        cv::hconcat(R_abs, t_abs, RT_cur);
+        cv::Mat P_ref = K_fallback * RT_ref;
+        cv::Mat P_cur = K_fallback * RT_cur;
+
+        std::vector<cv::Point3f> newPts;
+        doTriangulate(P_ref, P_cur, pts_ref, pts_cur, newPts);
+
+        int added = 0;
+        for (size_t k = 0; k < newPts.size() && k < matches.size(); ++k) {
+            if (newPts[k].z <= 0 || newPts[k].z > 10.0f) continue;
+            double err_ref = computeReprojectionError(P_ref, newPts[k], pts_ref[k]);
+            double err_cur = computeReprojectionError(P_cur, newPts[k], pts_cur[k]);
+            if (err_ref > 2.0 || err_cur > 2.0) continue;
+
+            points3D.push_back(newPts[k]);
+            cv::Point2f kpPt = keypoints[idx][matches[k].queryIdx].pt;
+            int x = cvRound(kpPt.x), y = cvRound(kpPt.y);
+            cv::Vec3b color(128,128,128);
+            if (x>=0 && y>=0 && x<images[idx].cols && y<images[idx].rows)
+                color = images[idx].at<cv::Vec3b>(y, x);
+            colors.push_back(color);
+            ++added;
+        }
+        qDebug() << "Ảnh" << idx << "thêm" << added << "điểm mới";
+    }
+
+    filterOutliersByDensity(0.02f, 3);
+    qDebug() << "=== Tổng điểm 3D (estimated):" << points3D.size() << "===";
+    return !points3D.empty();
+}
+
+// ------------------------------------------------------------------
+// reconstruct (public)
+// ------------------------------------------------------------------
+bool ReconstructionPipeline::reconstruct()
+{
+    if (images.size() < 2) {
+        qWarning() << "Cần ít nhất 2 ảnh!";
+        return false;
+    }
+
+    points3D.clear();
+    colors.clear();
+
+    keypoints.resize(images.size());
+    descriptors.resize(images.size());
+    for (size_t i = 0; i < images.size(); ++i) {
+        extractFeatures(i);
+        qDebug() << "Image" << i << "keypoints:" << keypoints[i].size();
+    }
+
+    if (hasGroundTruthParams && camParams.size() >= images.size())
+        return reconstructWithGroundTruth();
+    else
+        return reconstructWithEstimatedPose();
+}
+
+// ------------------------------------------------------------------
 // Getters
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------------
 std::vector<cv::Point3f> ReconstructionPipeline::getPointCloud() const
 { return points3D; }
 
