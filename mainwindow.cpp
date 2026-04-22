@@ -323,6 +323,7 @@ void MainWindow::onLoadMultiple2DImages()
 
     // Các tên file params phổ biến của Middlebury dataset
     QStringList paramsNames = {
+        "temple_par.txt",
         "templeR_par.txt",
         "templeRing_par.txt",
         "dinoR_par.txt",
