@@ -41,6 +41,9 @@ qt_add_executable(3D-Reconstruction
     PanStyle.cpp
     reconstructionpipeline.h
     reconstructionpipeline.cpp
+    reconstructthread.h
+    reconstructthread.cpp
+
 )
 
 # 6. Thêm include directories cho target

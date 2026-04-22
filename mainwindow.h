@@ -9,7 +9,6 @@
 #include <vector>
 #include <QProgressDialog>
 
-class QProgressBar;
 class ReconstructionPipeline;
 
 QT_BEGIN_NAMESPACE
@@ -36,7 +35,7 @@ private:
     void loadOBJwithMTL(const QString &objPath, const QString &mtlPath);
     void clear3DModel();
     void clear2DTexture();
-    void clearPointCloud();  // thêm hàm xóa point cloud
+    void clearPointCloud();
 
     Ui::MainWindow *ui;
     QVTKOpenGLNativeWidget *vtkWidget;
@@ -49,7 +48,8 @@ private:
     ReconstructionPipeline *reconstruction;
     bool pointCloudVisible;
 
-    QProgressBar *progressBar;  // thanh tiến trình
+    QProgressDialog *progressDialog;
+    QString lastUsedPath;   // Lưu đường dẫn mở file gần nhất
 };
 
 #endif
