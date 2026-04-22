@@ -14,14 +14,19 @@
 // ─────────────────────────────────────────────
 ReconstructionPipeline::ReconstructionPipeline()
 {
-    detector = cv::SIFT::create(0, 3, 0.04, 10, 1.6);
+    detector = cv::SIFT::create(
+        2000,   // tăng keypoints
+        3,
+        0.02,   // nhạy hơn
+        10,
+        1.6
+        );
 
-    // Fallback intrinsics – chỉ dùng khi KHÔNG có file params
-    // (với TempleRing thực tế là fx=1520.4, fy=1525.9, cx=302.32, cy=246.87)
     K_fallback = (cv::Mat_<double>(3,3)
                       << 1520.4, 0.0,    302.32,
                   0.0,    1525.9, 246.87,
                   0.0,    0.0,    1.0);
+
     distCoeffs = cv::Mat::zeros(4, 1, CV_64F);
 }
 
@@ -175,71 +180,92 @@ bool ReconstructionPipeline::reconstruct()
         const float yMin = -0.15f, yMax = 0.25f;
         const float zMin = -0.30f, zMax = 0.10f;
 
-        for (size_t i = 0; i + 1 < images.size(); ++i)
+        for (size_t i = 0; i < images.size(); ++i)
         {
-            // --- Match features ---
-            std::vector<cv::DMatch> matches;
-            matchFeatures(i, i + 1, matches);
-
-            if ((int)matches.size() < 30) {
-                qWarning() << "Cặp" << i << "-" << (i+1)
-                           << ": chỉ" << matches.size()
-                           << "matches → bỏ qua";
-                continue;
-            }
-
-            // --- Lấy điểm 2D tương ứng ---
-            std::vector<cv::Point2f> ptsA, ptsB;
-            ptsA.reserve(matches.size());
-            ptsB.reserve(matches.size());
-            for (const auto &m : matches) {
-                ptsA.push_back(keypoints[i  ][m.queryIdx].pt);
-                ptsB.push_back(keypoints[i+1][m.trainIdx].pt);
-            }
-
-            // --- Triangulation dùng P đã tính sẵn ---
-            std::vector<cv::Point3f> newPts;
-            doTriangulate(camParams[i].P, camParams[i+1].P,
-                          ptsA, ptsB, newPts);
-
-            // --- Lọc điểm hợp lệ ---
-            int kept = 0;
-            for (size_t j = 0; j < newPts.size() && j < matches.size(); ++j)
+            for (int offset = 1; offset <= 3; offset++)
             {
-                const cv::Point3f &pt = newPts[j];
+                int j = i + offset;
+                if (j >= images.size()) continue;
 
-                // 1) Điểm phải nằm trong bbox mở rộng
-                if (pt.x < xMin || pt.x > xMax) continue;
-                if (pt.y < yMin || pt.y > yMax) continue;
-                if (pt.z < zMin || pt.z > zMax) continue;
+                std::vector<cv::DMatch> matches;
+                matchFeatures(i, j, matches);
 
-                // 2) Điểm phải nằm TRƯỚC cả 2 camera (depth > 0)
-                //    depth = R[2,:] · pt + t[2]
-                cv::Mat pw = (cv::Mat_<double>(3,1) << pt.x, pt.y, pt.z);
-                // Ép MatExpr → cv::Mat trước khi dùng .at<>()
-                cv::Mat depth_i_mat = cv::Mat(camParams[i  ].R.row(2)) * pw;
-                cv::Mat depth_j_mat = cv::Mat(camParams[i+1].R.row(2)) * pw;
-                double z_i = depth_i_mat.at<double>(0,0) + camParams[i  ].t.at<double>(2);
-                double z_j = depth_j_mat.at<double>(0,0) + camParams[i+1].t.at<double>(2);
-                if (z_i <= 0 || z_j <= 0) continue;
+                if ((int)matches.size() < 30) continue;
 
-                // 3) Gán màu từ keypoint tương ứng trên ảnh i
-                cv::Point2f kpPt = keypoints[i][matches[j].queryIdx].pt;
-                int x = cvRound(kpPt.x);
-                int y = cvRound(kpPt.y);
-                cv::Vec3b color(128, 128, 128);
-                if (x >= 0 && y >= 0 && x < images[i].cols && y < images[i].rows)
-                    color = images[i].at<cv::Vec3b>(y, x);
+                std::vector<cv::Point2f> ptsA, ptsB;
+                for (const auto &m : matches) {
+                    ptsA.push_back(keypoints[i][m.queryIdx].pt);
+                    ptsB.push_back(keypoints[j][m.trainIdx].pt);
+                }
 
-                points3D.push_back(pt);
-                colors.push_back(color);
-                ++kept;
+                std::vector<cv::Point3f> newPts;
+                doTriangulate(camParams[i].P, camParams[j].P,
+                              ptsA, ptsB, newPts);
+
+                int kept = 0;
+
+                for (size_t k = 0; k < newPts.size() && k < matches.size(); ++k)
+                {
+                    const auto &pt = newPts[k];
+
+                    // Bounding box
+                    if (pt.x < -0.1f || pt.x > 0.2f) continue;
+                    if (pt.y < -0.15f || pt.y > 0.25f) continue;
+                    if (pt.z < -0.3f || pt.z > 0.1f) continue;
+
+                    // Depth check
+                    cv::Mat pw = (cv::Mat_<double>(3,1) << pt.x, pt.y, pt.z);
+
+                    cv::Mat depth_i_mat = cv::Mat(camParams[i].R.row(2)) * pw;
+                    cv::Mat depth_j_mat = cv::Mat(camParams[j].R.row(2)) * pw;
+
+                    double z_i = depth_i_mat.at<double>(0,0)
+                                 + camParams[i].t.at<double>(2);
+
+                    double z_j = depth_j_mat.at<double>(0,0)
+                                 + camParams[j].t.at<double>(2);
+
+                    if (z_i <= 0 || z_j <= 0) continue;
+
+                    // Reprojection error
+                    cv::Mat pt4 = (cv::Mat_<double>(4,1)
+                                       << pt.x, pt.y, pt.z, 1.0);
+
+                    cv::Mat proj_i = camParams[i].P * pt4;
+                    cv::Mat proj_j = camParams[j].P * pt4;
+
+                    cv::Point2f p_i(
+                        proj_i.at<double>(0)/proj_i.at<double>(2),
+                        proj_i.at<double>(1)/proj_i.at<double>(2));
+
+                    cv::Point2f p_j(
+                        proj_j.at<double>(0)/proj_j.at<double>(2),
+                        proj_j.at<double>(1)/proj_j.at<double>(2));
+
+                    double err =
+                        cv::norm(p_i - ptsA[k]) +
+                        cv::norm(p_j - ptsB[k]);
+
+                    if (err > 2.0) continue;
+
+                    // Color
+                    auto kp = keypoints[i][matches[k].queryIdx].pt;
+                    int x = cvRound(kp.x);
+                    int y = cvRound(kp.y);
+
+                    cv::Vec3b color(128,128,128);
+                    if (x>=0 && y>=0 && x<images[i].cols && y<images[i].rows)
+                        color = images[i].at<cv::Vec3b>(y,x);
+
+                    points3D.push_back(pt);
+                    colors.push_back(color);
+                    kept++;
+                }
+
+                qDebug() << "Pair" << i << "-" << j
+                         << "matches=" << matches.size()
+                         << "kept=" << kept;
             }
-
-            qDebug() << "Cặp" << i << "-" << (i+1)
-                     << ": matches=" << matches.size()
-                     << "  triangulated=" << newPts.size()
-                     << "  kept=" << kept;
         }
     }
     // ═══════════════════════════════════════════════
@@ -327,22 +353,45 @@ void ReconstructionPipeline::extractFeatures(int idx)
 // ─────────────────────────────────────────────
 // matchFeatures  (Lowe's ratio test 0.75)
 // ─────────────────────────────────────────────
-void ReconstructionPipeline::matchFeatures(int idx1, int idx2,
-                                           std::vector<cv::DMatch> &goodMatches)
+void ReconstructionPipeline::matchFeatures(
+    int idx1, int idx2,
+    std::vector<cv::DMatch> &goodMatches)
 {
-    // SIFT descriptors đã là CV_32F, nhưng convert phòng hờ
     cv::Mat d1 = descriptors[idx1], d2 = descriptors[idx2];
     if (d1.type() != CV_32F) d1.convertTo(d1, CV_32F);
     if (d2.type() != CV_32F) d2.convertTo(d2, CV_32F);
 
     cv::FlannBasedMatcher matcher;
+
     std::vector<std::vector<cv::DMatch>> knnMatches;
     matcher.knnMatch(d1, d2, knnMatches, 2);
 
-    goodMatches.clear();
-    for (const auto &knn : knnMatches)
+    std::vector<cv::DMatch> temp;
+    for (auto &knn : knnMatches) {
         if (knn.size() == 2 && knn[0].distance < 0.75f * knn[1].distance)
-            goodMatches.push_back(knn[0]);
+            temp.push_back(knn[0]);
+    }
+
+    // 🔥 RANSAC filter
+    std::vector<cv::Point2f> pts1, pts2;
+    for (auto &m : temp) {
+        pts1.push_back(keypoints[idx1][m.queryIdx].pt);
+        pts2.push_back(keypoints[idx2][m.trainIdx].pt);
+    }
+
+    if (pts1.size() >= 8) {
+        std::vector<uchar> mask;
+        cv::findFundamentalMat(pts1, pts2,
+                               cv::FM_RANSAC,
+                               1.0, 0.99, mask);
+
+        goodMatches.clear();
+        for (size_t i = 0; i < mask.size(); i++) {
+            if (mask[i]) goodMatches.push_back(temp[i]);
+        }
+    } else {
+        goodMatches = temp;
+    }
 }
 
 // ─────────────────────────────────────────────
