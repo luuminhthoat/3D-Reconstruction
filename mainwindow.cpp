@@ -301,55 +301,98 @@ void MainWindow::onLoad3DImages()
     QMessageBox::information(this, "Info", QString("Đã tải mô hình: %1").arg(objFileName));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Thay thế hàm onLoadMultiple2DImages() trong mainwindow.cpp
+// ─────────────────────────────────────────────────────────────────────────────
 void MainWindow::onLoadMultiple2DImages()
 {
-    QStringList files = QFileDialog::getOpenFileNames(this, "Select Images", "",
-                                                      "Images (*.png *.jpg *.bmp)");
+    QStringList files = QFileDialog::getOpenFileNames(
+        this, "Select Images", "", "Images (*.png *.jpg *.bmp)");
     if (files.isEmpty()) return;
 
-    // Không xóa scene, vẫn giữ mô hình hiện tại
+    // ✅ Sắp xếp đúng thứ tự tên file (templeR0001 → templeR0047)
+    files.sort();
+
     std::vector<QString> paths;
     for (const auto &f : files) paths.push_back(f);
     reconstruction->setImages(paths);
-    QMessageBox::information(this, "Info", QString("Đã tải %1 ảnh cho reconstruction").arg(paths.size()));
+
+    // ✅ Tự động tìm file *_par.txt trong cùng thư mục ảnh
+    QFileInfo firstFile(files.first());
+    QString folder = firstFile.absolutePath();
+
+    // Các tên file params phổ biến của Middlebury dataset
+    QStringList paramsNames = {
+        "templeR_par.txt",
+        "templeRing_par.txt",
+        "dinoR_par.txt",
+        "dinoRing_par.txt",
+        "par.txt",
+        "camera_params.txt"
+    };
+
+    bool paramsLoaded = false;
+    QString loadedParamsPath;
+    for (const auto &name : paramsNames) {
+        QString paramsPath = folder + "/" + name;
+        if (QFileInfo::exists(paramsPath)) {
+            paramsLoaded = reconstruction->loadCameraParams(paramsPath);
+            if (paramsLoaded) {
+                loadedParamsPath = paramsPath;
+                break;
+            }
+        }
+    }
+
+    // Thông báo kết quả
+    QString msg = QString("Đã tải %1 ảnh.").arg(paths.size());
+    if (paramsLoaded) {
+        msg += QString("\n\n✅ Camera params: %1").arg(
+            QFileInfo(loadedParamsPath).fileName());
+        msg += "\n→ Sẽ dùng ground-truth projection matrices.";
+    } else {
+        msg += "\n\n⚠️ Không tìm thấy file *_par.txt trong:\n" + folder;
+        msg += "\n→ Đặt file templeR_par.txt cùng thư mục ảnh để có kết quả tốt nhất.";
+        msg += "\n→ Sẽ dùng estimated pose (kém chính xác hơn).";
+    }
+
+    QMessageBox::information(this, "Load Images", msg);
 }
 
-// onRunReconstruction
+// ─────────────────────────────────────────────────────────────────────────────
+// Thay thế hàm onRunReconstruction() trong mainwindow.cpp
+// ─────────────────────────────────────────────────────────────────────────────
 void MainWindow::onRunReconstruction()
 {
-    progressBar->setRange(0, 100);
-    progressBar->setValue(0);
+    progressBar->setRange(0, 0);   // chế độ "đang chạy" (animated)
     progressBar->setVisible(true);
     statusBar()->showMessage("Đang tái tạo 3D...");
     QApplication::processEvents();
 
-    QTimer *timer = new QTimer(this);
-    int current = 0;
-    connect(timer, &QTimer::timeout, [&]() {
-        if (current < 95) {
-            current += 1;
-            progressBar->setValue(current);
-        }
-        QApplication::processEvents();
-    });
-    timer->start(30);
-
     bool success = reconstruction->reconstruct();
 
-    timer->stop();
-    delete timer;
+    progressBar->setRange(0, 100);
     progressBar->setValue(100);
     QApplication::processEvents();
     QThread::msleep(200);
-
     progressBar->setVisible(false);
     statusBar()->clearMessage();
 
     if (!success) {
-        QMessageBox::warning(this, "Error", "Reconstruction thất bại!");
+        QMessageBox::warning(this, "Lỗi",
+                             "Reconstruction thất bại!\n"
+                             "Kiểm tra:\n"
+                             "  • Đã load ít nhất 2 ảnh chưa?\n"
+                             "  • File templeR_par.txt có cùng thư mục ảnh không?");
         return;
     }
-    QMessageBox::information(this, "Success", "Point cloud đã được tạo.");
+
+    // ✅ Tự động hiển thị point cloud ngay sau khi reconstruct
+    onShowPointCloud();
+
+    QMessageBox::information(this, "Thành công",
+                             QString("Reconstruction hoàn tất!\nTổng số điểm 3D: %1")
+                                 .arg(reconstruction->getPointCloud().size()));
 }
 
 void MainWindow::onShowPointCloud()
