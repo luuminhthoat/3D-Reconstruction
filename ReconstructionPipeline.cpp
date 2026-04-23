@@ -457,6 +457,36 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose()
     return !points3D.empty();
 }
 
+PointCloudT::Ptr ReconstructionPipeline::convertToPCLCloud(const std::vector<cv::Point3f>& pts,
+                                   const std::vector<cv::Vec3b>& cols) const {
+    PointCloudT::Ptr cloud(new PointCloudT);
+    cloud->reserve(pts.size());
+    for (size_t i = 0; i < pts.size(); ++i) {
+        PointT p;
+        p.x = pts[i].x;
+        p.y = pts[i].y;
+        p.z = pts[i].z;
+        // Gán màu (OpenCV BGR -> PCL RGB)
+        p.b = cols[i][0];
+        p.g = cols[i][1];
+        p.r = cols[i][2];
+        cloud->push_back(p);
+    }
+    return cloud;
+}
+
+void ReconstructionPipeline::convertFromPCLCloud(PointCloudT::Ptr cloud,
+                         std::vector<cv::Point3f>& pts,
+                         std::vector<cv::Vec3b>& cols) {
+    pts.clear();
+    cols.clear();
+    pts.reserve(cloud->size());
+    cols.reserve(cloud->size());
+    for (const auto& p : cloud->points) {
+        pts.emplace_back(p.x, p.y, p.z);
+        cols.emplace_back(p.b, p.g, p.r);
+    }
+}
 // ------------------------------------------------------------------
 // reconstruct (public)
 // ------------------------------------------------------------------
@@ -478,9 +508,26 @@ bool ReconstructionPipeline::reconstruct()
     }
 
     if (hasGroundTruthParams && camParams.size() >= images.size())
-        return reconstructWithGroundTruth();
+       /* return*/ reconstructWithGroundTruth();
     else
-        return reconstructWithEstimatedPose();
+        /*return */reconstructWithEstimatedPose();
+
+    // === CẢI THIỆN CHẤT LƯỢNG ĐÁM MÂY ĐIỂM ===
+    qDebug() << "Bắt đầu hậu xử lý point cloud...";
+
+    filterOutliersByDensity(0.02f, 3);
+
+    // 1. Lọc nhiễu thống kê (xóa điểm có khoảng cách lân cận bất thường)
+    // statisticalOutlierFilter(50, 1.0);
+
+    // 2. Lọc theo bán kính (xóa điểm cô lập)
+    // radiusOutlierFilter(0.02, 3);
+
+    // 3. Giảm mẫu bằng voxel grid (tùy chọn, làm đều mật độ)
+    // voxelGridDownsample(0.005);
+
+    qDebug() << "Point cloud sau xử lý:" << points3D.size() << "điểm";
+    return true;
 }
 
 // ------------------------------------------------------------------
@@ -491,3 +538,47 @@ std::vector<cv::Point3f> ReconstructionPipeline::getPointCloud() const
 
 std::vector<cv::Vec3b> ReconstructionPipeline::getPointColors() const
 { return colors; }
+
+// Lọc Statistical Outlier Removal (SOR)
+void ReconstructionPipeline::statisticalOutlierFilter(float meanK, float stdDevMulThresh) {
+    if (points3D.empty()) return;
+    PointCloudT::Ptr cloud = convertToPCLCloud(points3D, colors);
+
+    pcl::StatisticalOutlierRemoval<PointT> sor;
+    sor.setInputCloud(cloud);
+    sor.setMeanK(meanK);               // số lân cận để tính trung bình
+    sor.setStddevMulThresh(stdDevMulThresh); // ngưỡng nhân với độ lệch chuẩn
+    sor.filter(*cloud);
+
+    convertFromPCLCloud(cloud, points3D, colors);
+    qDebug() << "SOR: giữ lại" << points3D.size() << "điểm";
+}
+
+// Lọc Radius Outlier Removal (ROR)
+void ReconstructionPipeline::radiusOutlierFilter(float radius, int minNeighbors) {
+    if (points3D.empty()) return;
+    PointCloudT::Ptr cloud = convertToPCLCloud(points3D, colors);
+
+    pcl::RadiusOutlierRemoval<PointT> ror;
+    ror.setInputCloud(cloud);
+    ror.setRadiusSearch(radius);
+    ror.setMinNeighborsInRadius(minNeighbors);
+    ror.filter(*cloud);
+
+    convertFromPCLCloud(cloud, points3D, colors);
+    qDebug() << "ROR: giữ lại" << points3D.size() << "điểm";
+}
+
+// Giảm mẫu bằng Voxel Grid
+void ReconstructionPipeline::voxelGridDownsample(float leafSize) {
+    if (points3D.empty()) return;
+    PointCloudT::Ptr cloud = convertToPCLCloud(points3D, colors);
+
+    pcl::VoxelGrid<PointT> vg;
+    vg.setInputCloud(cloud);
+    vg.setLeafSize(leafSize, leafSize, leafSize);
+    vg.filter(*cloud);
+
+    convertFromPCLCloud(cloud, points3D, colors);
+    qDebug() << "VoxelGrid: giữ lại" << points3D.size() << "điểm";
+}

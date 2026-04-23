@@ -8,6 +8,7 @@
 #include <vtkActor.h>
 #include <vector>
 #include <QProgressDialog>
+#include <QProgressBar>
 
 class ReconstructionPipeline;
 
@@ -49,6 +50,7 @@ private:
     bool pointCloudVisible;
 
     QProgressDialog *progressDialog;
+    QProgressBar *progressBar;
     QString lastUsedPath;   // Lưu đường dẫn mở file gần nhất
 };
 

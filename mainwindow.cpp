@@ -153,12 +153,16 @@ MainWindow::MainWindow(QWidget* parent)
 
     // Tạo progress dialog (sẽ hiển thị khi cần)
     progressDialog = new QProgressDialog(this);
+    progressBar = new QProgressBar(progressDialog);
+    progressBar->setFixedHeight(50);
+    progressBar->setMinimumWidth(400);
+    progressDialog->setBar(progressBar);
     progressDialog->setCancelButton(nullptr);
     progressDialog->setMinimumDuration(0);
     progressDialog->setWindowModality(Qt::WindowModal);
     progressDialog->setRange(0, 100);
     progressDialog->reset();
-    progressDialog->setMinimumSize(400, 120);
+    progressDialog->setMinimumSize(500, 200);
 
     // Toolbar
     QToolBar *toolBar = addToolBar("Reconstruction 3d");
@@ -278,7 +282,7 @@ void MainWindow::onLoad3DImages()
 
     progressDialog->setLabelText("Đang tải mô hình 3D...");
     progressDialog->setRange(0, 0);   // indeterminate
-    progressDialog->setMinimumSize(400, 120);
+    progressDialog->setMinimumSize(500, 200);
     progressDialog->show();
     QApplication::processEvents();
 
@@ -354,7 +358,7 @@ void MainWindow::onRunReconstruction()
 {
     progressDialog->setLabelText("Đang tái tạo 3D...");
     progressDialog->setRange(0, 0);
-    progressDialog->setMinimumSize(400, 120);
+    progressDialog->setMinimumSize(500, 200);
     progressDialog->show();
     QApplication::processEvents();
 

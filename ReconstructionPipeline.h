@@ -6,6 +6,16 @@
 #include <opencv2/core.hpp>
 #include <opencv2/features2d.hpp>
 
+#include <pcl/point_types.h>
+#include <pcl/point_cloud.h>
+#include <pcl/filters/statistical_outlier_removal.h>
+#include <pcl/filters/radius_outlier_removal.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/io/ply_io.h>  // nếu muốn lưu kết quả
+
+typedef pcl::PointXYZRGB PointT;
+typedef pcl::PointCloud<PointT> PointCloudT;
+
 struct CameraParams {
     QString imageName;
     cv::Mat K;  // 3x3
@@ -26,6 +36,13 @@ public:
 
     std::vector<cv::Point3f> getPointCloud() const;
     std::vector<cv::Vec3b> getPointColors() const;
+
+    // Lọc Statistical Outlier Removal (SOR)
+    void statisticalOutlierFilter(float meanK = 50, float stdDevMulThresh = 1.0);
+    // Lọc Radius Outlier Removal (ROR)
+    void radiusOutlierFilter(float radius = 0.02, int minNeighbors = 3);
+    // Giảm mẫu bằng Voxel Grid
+    void voxelGridDownsample(float leafSize = 0.005);
 
 private:
     // Dữ liệu
@@ -63,6 +80,12 @@ private:
     // Hai phương thức reconstruct riêng
     bool reconstructWithGroundTruth();
     bool reconstructWithEstimatedPose();
+
+    PointCloudT::Ptr convertToPCLCloud(const std::vector<cv::Point3f>& pts,
+                                       const std::vector<cv::Vec3b>& cols) const;
+    void convertFromPCLCloud(PointCloudT::Ptr cloud,
+                                 std::vector<cv::Point3f>& pts,
+                                 std::vector<cv::Vec3b>& cols);
 };
 
 #endif

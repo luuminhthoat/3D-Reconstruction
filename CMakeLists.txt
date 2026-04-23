@@ -24,13 +24,17 @@ find_package(VTK REQUIRED COMPONENTS
 set(OpenCV_DIR "C:/opencv/build")
 find_package(OpenCV REQUIRED)
 
+# 3.5. Tìm PCL (Point Cloud Library)
+set(PCL_DIR "C:/Program Files/PCL 1.15.1/cmake" CACHE PATH "Path to PCL CMake files")
+find_package(PCL REQUIRED COMPONENTS common filters io)
+
 # 4. Eigen3 (header-only, không cần find_package)
 set(EIGEN3_INCLUDE_DIR "C:/eigen-5.0.0")
 if(NOT EXISTS ${EIGEN3_INCLUDE_DIR}/Eigen/Core)
     message(FATAL_ERROR "Eigen3 not found at ${EIGEN3_INCLUDE_DIR}")
 endif()
 
-# 5. Khai báo executable (thêm các file mới)
+# 5. Khai báo executable
 qt_add_executable(3D-Reconstruction
     WIN32 MACOSX_BUNDLE
     main.cpp
@@ -43,20 +47,23 @@ qt_add_executable(3D-Reconstruction
     reconstructionpipeline.cpp
     reconstructthread.h
     reconstructthread.cpp
-
 )
 
 # 6. Thêm include directories cho target
 target_include_directories(3D-Reconstruction PRIVATE
     ${VTK_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
-    ${EIGEN3_INCLUDE_DIR}      # Thay vì ${EIGEN3_INCLUDE_DIRS}
+    ${EIGEN3_INCLUDE_DIR}
+    ${PCL_INCLUDE_DIRS}          # <--- Thêm PCL
 )
 
-# 7. Định nghĩa compile flags từ VTK
-target_compile_definitions(3D-Reconstruction PRIVATE ${VTK_DEFINITIONS})
+# 7. Định nghĩa compile flags từ VTK và PCL
+target_compile_definitions(3D-Reconstruction PRIVATE
+    ${VTK_DEFINITIONS}
+    ${PCL_DEFINITIONS}           # <--- Thêm PCL
+)
 
-# 8. Liên kết thư viện (bỏ Eigen3::Eigen)
+# 8. Liên kết thư viện
 target_link_libraries(3D-Reconstruction
     PRIVATE
         Qt6::Core
@@ -64,7 +71,7 @@ target_link_libraries(3D-Reconstruction
         Qt6::OpenGL
         ${VTK_LIBRARIES}
         ${OpenCV_LIBS}
-        # Eigen3::Eigen không cần vì chỉ là header
+        ${PCL_LIBRARIES}         # <--- Thêm PCL
 )
 
 # 9. Cài đặt
