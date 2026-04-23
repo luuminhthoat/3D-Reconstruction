@@ -515,16 +515,16 @@ bool ReconstructionPipeline::reconstruct()
     // === CẢI THIỆN CHẤT LƯỢNG ĐÁM MÂY ĐIỂM ===
     qDebug() << "Bắt đầu hậu xử lý point cloud...";
 
-    filterOutliersByDensity(0.02f, 3);
+    // filterOutliersByDensity(0.02f, 3);
 
     // 1. Lọc nhiễu thống kê (xóa điểm có khoảng cách lân cận bất thường)
-    // statisticalOutlierFilter(50, 1.0);
+    statisticalOutlierFilter(50, 1.0);
 
     // 2. Lọc theo bán kính (xóa điểm cô lập)
-    // radiusOutlierFilter(0.02, 3);
+    radiusOutlierFilter(0.02, 3);
 
     // 3. Giảm mẫu bằng voxel grid (tùy chọn, làm đều mật độ)
-    // voxelGridDownsample(0.005);
+    voxelGridDownsample(0.005);
 
     qDebug() << "Point cloud sau xử lý:" << points3D.size() << "điểm";
     return true;
@@ -539,46 +539,193 @@ std::vector<cv::Point3f> ReconstructionPipeline::getPointCloud() const
 std::vector<cv::Vec3b> ReconstructionPipeline::getPointColors() const
 { return colors; }
 
-// Lọc Statistical Outlier Removal (SOR)
+// reconstructionpipeline.cpp
+
 void ReconstructionPipeline::statisticalOutlierFilter(float meanK, float stdDevMulThresh) {
     if (points3D.empty()) return;
-    PointCloudT::Ptr cloud = convertToPCLCloud(points3D, colors);
+    int K = (int)meanK;
+    size_t n = points3D.size();
+    if (n < (size_t)K + 1) return;
 
-    pcl::StatisticalOutlierRemoval<PointT> sor;
-    sor.setInputCloud(cloud);
-    sor.setMeanK(meanK);               // số lân cận để tính trung bình
-    sor.setStddevMulThresh(stdDevMulThresh); // ngưỡng nhân với độ lệch chuẩn
-    sor.filter(*cloud);
+    // Tính khoảng cách trung bình đến K láng giềng gần nhất cho mỗi điểm
+    std::vector<double> meanDists(n, 0.0);
 
-    convertFromPCLCloud(cloud, points3D, colors);
-    qDebug() << "SOR: giữ lại" << points3D.size() << "điểm";
+    for (size_t i = 0; i < n; ++i) {
+        // Thu thập khoảng cách đến tất cả điểm khác
+        std::vector<double> dists;
+        dists.reserve(n - 1);
+        for (size_t j = 0; j < n; ++j) {
+            if (i == j) continue;
+            double dx = points3D[i].x - points3D[j].x;
+            double dy = points3D[i].y - points3D[j].y;
+            double dz = points3D[i].z - points3D[j].z;
+            dists.push_back(std::sqrt(dx*dx + dy*dy + dz*dz));
+        }
+        // Lấy K láng giềng gần nhất
+        std::partial_sort(dists.begin(),
+                          dists.begin() + std::min(K, (int)dists.size()),
+                          dists.end());
+        double sum = 0.0;
+        int cnt = std::min(K, (int)dists.size());
+        for (int k = 0; k < cnt; ++k) sum += dists[k];
+        meanDists[i] = (cnt > 0) ? sum / cnt : 0.0;
+    }
+
+    // Tính mean và stddev của meanDists
+    double globalMean = 0.0;
+    for (double d : meanDists) globalMean += d;
+    globalMean /= (double)n;
+
+    double variance = 0.0;
+    for (double d : meanDists) {
+        double diff = d - globalMean;
+        variance += diff * diff;
+    }
+    double stdDev = std::sqrt(variance / (double)n);
+    double threshold = globalMean + stdDevMulThresh * stdDev;
+
+    // Giữ lại điểm có meanDist < threshold
+    std::vector<cv::Point3f> newPts;
+    std::vector<cv::Vec3b>   newCols;
+    for (size_t i = 0; i < n; ++i) {
+        if (meanDists[i] < threshold) {
+            newPts.push_back(points3D[i]);
+            newCols.push_back(colors[i]);
+        }
+    }
+    qDebug() << "SOR: giữ lại" << newPts.size() << "/" << n << "điểm";
+    points3D.swap(newPts);
+    colors.swap(newCols);
 }
 
-// Lọc Radius Outlier Removal (ROR)
 void ReconstructionPipeline::radiusOutlierFilter(float radius, int minNeighbors) {
     if (points3D.empty()) return;
-    PointCloudT::Ptr cloud = convertToPCLCloud(points3D, colors);
+    size_t n = points3D.size();
+    std::vector<cv::Point3f> newPts;
+    std::vector<cv::Vec3b>   newCols;
 
-    pcl::RadiusOutlierRemoval<PointT> ror;
-    ror.setInputCloud(cloud);
-    ror.setRadiusSearch(radius);
-    ror.setMinNeighborsInRadius(minNeighbors);
-    ror.filter(*cloud);
-
-    convertFromPCLCloud(cloud, points3D, colors);
-    qDebug() << "ROR: giữ lại" << points3D.size() << "điểm";
+    for (size_t i = 0; i < n; ++i) {
+        int neighbors = 0;
+        for (size_t j = 0; j < n; ++j) {
+            if (i == j) continue;
+            float dx = points3D[i].x - points3D[j].x;
+            float dy = points3D[i].y - points3D[j].y;
+            float dz = points3D[i].z - points3D[j].z;
+            if (std::sqrt(dx*dx + dy*dy + dz*dz) < radius) {
+                ++neighbors;
+                if (neighbors >= minNeighbors) break; // early exit
+            }
+        }
+        if (neighbors >= minNeighbors) {
+            newPts.push_back(points3D[i]);
+            newCols.push_back(colors[i]);
+        }
+    }
+    qDebug() << "ROR: giữ lại" << newPts.size() << "/" << n << "điểm";
+    points3D.swap(newPts);
+    colors.swap(newCols);
 }
 
-// Giảm mẫu bằng Voxel Grid
 void ReconstructionPipeline::voxelGridDownsample(float leafSize) {
     if (points3D.empty()) return;
-    PointCloudT::Ptr cloud = convertToPCLCloud(points3D, colors);
 
-    pcl::VoxelGrid<PointT> vg;
-    vg.setInputCloud(cloud);
-    vg.setLeafSize(leafSize, leafSize, leafSize);
-    vg.filter(*cloud);
+    // Tìm bounding box
+    float xMin = points3D[0].x, xMax = xMin;
+    float yMin = points3D[0].y, yMax = yMin;
+    float zMin = points3D[0].z, zMax = zMin;
+    for (const auto &p : points3D) {
+        xMin = std::min(xMin, p.x); xMax = std::max(xMax, p.x);
+        yMin = std::min(yMin, p.y); yMax = std::max(yMax, p.y);
+        zMin = std::min(zMin, p.z); zMax = std::max(zMax, p.z);
+    }
 
-    convertFromPCLCloud(cloud, points3D, colors);
-    qDebug() << "VoxelGrid: giữ lại" << points3D.size() << "điểm";
+    // Gán mỗi điểm vào voxel
+    // key = (ix, iy, iz), value = (tổng xyz, tổng màu, số điểm)
+    struct VoxelData {
+        double sx = 0, sy = 0, sz = 0;
+        double sr = 0, sg = 0, sb = 0;
+        int count = 0;
+    };
+    auto voxelKey = [&](const cv::Point3f &p) -> std::tuple<int,int,int> {
+        int ix = (int)std::floor((p.x - xMin) / leafSize);
+        int iy = (int)std::floor((p.y - yMin) / leafSize);
+        int iz = (int)std::floor((p.z - zMin) / leafSize);
+        return {ix, iy, iz};
+    };
+
+    std::map<std::tuple<int,int,int>, VoxelData> voxelMap;
+    for (size_t i = 0; i < points3D.size(); ++i) {
+        auto key = voxelKey(points3D[i]);
+        auto &vd = voxelMap[key];
+        vd.sx += points3D[i].x; vd.sy += points3D[i].y; vd.sz += points3D[i].z;
+        vd.sr += colors[i][2];  vd.sg += colors[i][1];  vd.sb += colors[i][0];
+        vd.count++;
+    }
+
+    std::vector<cv::Point3f> newPts;
+    std::vector<cv::Vec3b>   newCols;
+    newPts.reserve(voxelMap.size());
+    newCols.reserve(voxelMap.size());
+    for (const auto &kv : voxelMap) {
+        const VoxelData &vd = kv.second;
+        double inv = 1.0 / vd.count;
+        newPts.push_back(cv::Point3f(
+            (float)(vd.sx * inv),
+            (float)(vd.sy * inv),
+            (float)(vd.sz * inv)));
+        newCols.push_back(cv::Vec3b(
+            (uchar)(vd.sb * inv),  // B
+            (uchar)(vd.sg * inv),  // G
+            (uchar)(vd.sr * inv))); // R
+    }
+    qDebug() << "VoxelGrid: giữ lại" << newPts.size() << "/" << points3D.size() << "điểm";
+    points3D.swap(newPts);
+    colors.swap(newCols);
 }
+
+// // Lọc Statistical Outlier Removal (SOR)
+// void ReconstructionPipeline::statisticalOutlierFilter(float meanK, float stdDevMulThresh) {
+//     if (points3D.empty()) return;
+//     PointCloudT::Ptr cloud = convertToPCLCloud(points3D, colors);
+//     PointCloudT::Ptr filtered(new PointCloudT);  // ← Output riêng
+
+//     pcl::StatisticalOutlierRemoval<PointT> sor;
+//     sor.setInputCloud(cloud);
+//     sor.setMeanK(meanK);
+//     sor.setStddevMulThresh(stdDevMulThresh);
+//     sor.filter(*filtered);  // ← filter vào biến mới
+
+//     convertFromPCLCloud(filtered, points3D, colors);
+//     qDebug() << "SOR: giữ lại" << points3D.size() << "điểm";
+// }
+
+// // Lọc Radius Outlier Removal (ROR)
+// void ReconstructionPipeline::radiusOutlierFilter(float radius, int minNeighbors) {
+//     if (points3D.empty()) return;
+//     PointCloudT::Ptr cloud = convertToPCLCloud(points3D, colors);
+//     PointCloudT::Ptr filtered(new PointCloudT);  // ← Output riêng
+
+//     pcl::RadiusOutlierRemoval<PointT> ror;
+//     ror.setInputCloud(cloud);
+//     ror.setRadiusSearch(radius);
+//     ror.setMinNeighborsInRadius(minNeighbors);
+//     ror.filter(*filtered);  // ← filter vào biến mới
+
+//     convertFromPCLCloud(filtered, points3D, colors);
+//     qDebug() << "ROR: giữ lại" << points3D.size() << "điểm";
+// }
+
+// // Giảm mẫu bằng Voxel Grid
+// void ReconstructionPipeline::voxelGridDownsample(float leafSize) {
+//     if (points3D.empty()) return;
+//     PointCloudT::Ptr cloud = convertToPCLCloud(points3D, colors);
+//     PointCloudT::Ptr filtered(new PointCloudT);  // ← Output riêng biệt
+
+//     pcl::VoxelGrid<PointT> vg;
+//     vg.setInputCloud(cloud);
+//     vg.setLeafSize(leafSize, leafSize, leafSize);
+//     vg.filter(*filtered);  // ← filter vào biến mới, không overwrite input
+
+//     convertFromPCLCloud(filtered, points3D, colors);
+//     qDebug() << "VoxelGrid: giữ lại" << points3D.size() << "điểm";
+// }
