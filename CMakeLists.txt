@@ -61,6 +61,7 @@ target_include_directories(3D-Reconstruction PRIVATE
 target_compile_definitions(3D-Reconstruction PRIVATE
     ${VTK_DEFINITIONS}
     ${PCL_DEFINITIONS}           # <--- Thêm PCL
+    PCL_SILENCE_MALLOC_WARNING=1 # <--- Tắt cảnh báo AVX/malloc mismatch
 )
 
 # 8. Liên kết thư viện
