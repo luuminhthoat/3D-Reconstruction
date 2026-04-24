@@ -1,31 +1,30 @@
 #ifndef RECONSTRUCTION_PIPELINE_H
 #define RECONSTRUCTION_PIPELINE_H
 
-#include <vector>
 #include <QString>
 #include <opencv2/core.hpp>
 #include <opencv2/features2d.hpp>
+#include <vector>
 
-#include <pcl/point_types.h>
-#include <pcl/point_cloud.h>
-#include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/filters/radius_outlier_removal.h>
+#include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/filters/voxel_grid.h>
-#include <pcl/io/ply_io.h>  // nếu muốn lưu kết quả
+#include <pcl/io/ply_io.h> // nếu muốn lưu kết quả
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
 
 typedef pcl::PointXYZRGB PointT;
 typedef pcl::PointCloud<PointT> PointCloudT;
 
 struct CameraParams {
     QString imageName;
-    cv::Mat K;  // 3x3
-    cv::Mat R;  // 3x3
-    cv::Mat t;  // 3x1
-    cv::Mat P;  // 3x4 = K * [R|t]
+    cv::Mat K; // 3x3
+    cv::Mat R; // 3x3
+    cv::Mat t; // 3x1
+    cv::Mat P; // 3x4 = K * [R|t]
 };
 
-class ReconstructionPipeline
-{
+class ReconstructionPipeline {
 public:
     ReconstructionPipeline();
     ~ReconstructionPipeline();
@@ -51,8 +50,8 @@ private:
     std::vector<cv::Mat> descriptors;
     cv::Ptr<cv::Feature2D> detector;
 
-    cv::Mat K_fallback;    // intrinsic khi không có params
-    cv::Mat distCoeffs;    // (bỏ qua distortion)
+    cv::Mat K_fallback; // intrinsic khi không có params
+    cv::Mat distCoeffs; // (bỏ qua distortion)
 
     // Ground truth params
     std::vector<CameraParams> camParams;
@@ -66,14 +65,13 @@ private:
     void extractFeatures(int idx);
     void matchFeatures(int idx1, int idx2, std::vector<cv::DMatch> &goodMatches);
     bool estimatePoseFromMatches(const std::vector<cv::Point2f> &pts1,
-                                 const std::vector<cv::Point2f> &pts2,
-                                 cv::Mat &R, cv::Mat &t);
+                                 const std::vector<cv::Point2f> &pts2, cv::Mat &R,
+                                 cv::Mat &t);
     void doTriangulate(const cv::Mat &P0, const cv::Mat &P1,
                        const std::vector<cv::Point2f> &pts0,
                        const std::vector<cv::Point2f> &pts1,
                        std::vector<cv::Point3f> &outPts);
-    double computeReprojectionError(const cv::Mat &P,
-                                    const cv::Point3f &pt3d,
+    double computeReprojectionError(const cv::Mat &P, const cv::Point3f &pt3d,
                                     const cv::Point2f &pt2d);
     void filterOutliersByDensity(float radius, int minNeighbors);
 
@@ -81,11 +79,11 @@ private:
     bool reconstructWithGroundTruth();
     bool reconstructWithEstimatedPose();
 
-    PointCloudT::Ptr convertToPCLCloud(const std::vector<cv::Point3f>& pts,
-                                       const std::vector<cv::Vec3b>& cols) const;
+    PointCloudT::Ptr convertToPCLCloud(const std::vector<cv::Point3f> &pts,
+                                       const std::vector<cv::Vec3b> &cols) const;
     void convertFromPCLCloud(PointCloudT::Ptr cloud,
-                                 std::vector<cv::Point3f>& pts,
-                                 std::vector<cv::Vec3b>& cols);
+                             std::vector<cv::Point3f> &pts,
+                             std::vector<cv::Vec3b> &cols);
 };
 
 #endif

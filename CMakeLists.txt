@@ -28,11 +28,7 @@ find_package(OpenCV REQUIRED)
 set(PCL_DIR "C:/Program Files/PCL 1.15.1/cmake" CACHE PATH "Path to PCL CMake files")
 find_package(PCL REQUIRED COMPONENTS common filters io)
 
-# 4. Eigen3 (header-only, không cần find_package)
-set(EIGEN3_INCLUDE_DIR "C:/eigen-5.0.0")
-if(NOT EXISTS ${EIGEN3_INCLUDE_DIR}/Eigen/Core)
-    message(FATAL_ERROR "Eigen3 not found at ${EIGEN3_INCLUDE_DIR}")
-endif()
+# 4. Eigen3 sẽ tự động được include từ PCL_INCLUDE_DIRS (PCL thường đi kèm Eigen 3.x)
 
 # 5. Khai báo executable
 qt_add_executable(3D-Reconstruction
@@ -53,8 +49,7 @@ qt_add_executable(3D-Reconstruction
 target_include_directories(3D-Reconstruction PRIVATE
     ${VTK_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
-    ${EIGEN3_INCLUDE_DIR}
-    ${PCL_INCLUDE_DIRS}          # <--- Thêm PCL
+    ${PCL_INCLUDE_DIRS}          # <--- Thêm PCL (đã bao gồm Eigen)
 )
 
 # 7. Định nghĩa compile flags từ VTK và PCL
