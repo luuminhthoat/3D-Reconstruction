@@ -10,15 +10,17 @@
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/core/utility.hpp>
 #include <set>
+#include <mutex>
 
 // ------------------------------------------------------------------
 // Constructor / Destructor
 // ------------------------------------------------------------------
 ReconstructionPipeline::ReconstructionPipeline() {
-    // nFeatures=2000: detect nhiều keypoint hơn → nhiều matches → nhiều điểm 3D
+    // nFeatures=4000: detect nhiều keypoint hơn → tăng độ chính xác và mật độ điểm
     // hơn
-    detector = cv::SIFT::create(2000, 3, 0.03, 10, 1.6);
+    detector = cv::SIFT::create(4000, 3, 0.04, 10, 1.6);
     K_fallback = (cv::Mat_<double>(3, 3) << 1520.4, 0.0, 302.32, 0.0, 1525.9,
                   246.87, 0.0, 0.0, 1.0);
     distCoeffs = cv::Mat::zeros(4, 1, CV_64F);
@@ -133,13 +135,13 @@ void ReconstructionPipeline::matchFeatures(
     std::set<int> goodIndices1, goodIndices2;
     for (size_t i = 0; i < knn1.size(); ++i) {
         if (knn1[i].size() == 2 &&
-            knn1[i][0].distance < 0.75f * knn1[i][1].distance) {
+            knn1[i][0].distance < 0.70f * knn1[i][1].distance) {
             goodIndices1.insert(i);
         }
     }
     for (size_t i = 0; i < knn2.size(); ++i) {
         if (knn2[i].size() == 2 &&
-            knn2[i][0].distance < 0.75f * knn2[i][1].distance) {
+            knn2[i][0].distance < 0.70f * knn2[i][1].distance) {
             goodIndices2.insert(knn2[i][0].trainIdx);
         }
     }
@@ -251,8 +253,26 @@ bool ReconstructionPipeline::reconstructWithGroundTruth() {
     const float yMin = -0.15f, yMax = 0.25f;
     const float zMin = -0.30f, zMax = 0.10f;
 
+    std::vector<std::pair<int, int>> pairs;
+    // Để tăng tốc cho tập ảnh lớn (đặc biệt khi chụp liên tiếp), ta giới hạn số lượng cặp.
+    // Nếu ảnh có thứ tự, các ảnh ở xa nhau thường không có điểm chung.
+    // Ta giới hạn ghép với tối đa 20 ảnh lân cận.
     for (size_t i = 0; i < images.size(); ++i) {
-        for (size_t j = i + 1; j < images.size(); ++j) {
+        size_t j_end = std::min(images.size(), i + 20);
+        for (size_t j = i + 1; j < j_end; ++j) {
+            pairs.push_back({(int)i, (int)j});
+        }
+    }
+
+    std::mutex mtx;
+    cv::parallel_for_(cv::Range(0, pairs.size()), [&](const cv::Range& range) {
+        std::vector<cv::Point3f> localPoints;
+        std::vector<cv::Vec3b> localColors;
+
+        for (int r = range.start; r < range.end; ++r) {
+            int i = pairs[r].first;
+            int j = pairs[r].second;
+
             std::vector<cv::DMatch> matches;
             matchFeatures(i, j, matches);
             if (matches.size() < 50)
@@ -272,11 +292,7 @@ bool ReconstructionPipeline::reconstructWithGroundTruth() {
             int kept = 0;
             for (size_t k = 0; k < newPts.size() && k < matches.size(); ++k) {
                 const cv::Point3f &pt = newPts[k];
-                if (pt.x < xMin || pt.x > xMax)
-                    continue;
-                if (pt.y < yMin || pt.y > yMax)
-                    continue;
-                if (pt.z < zMin || pt.z > zMax)
+                if (pt.x < xMin || pt.x > xMax || pt.y < yMin || pt.y > yMax || pt.z < zMin || pt.z > zMax)
                     continue;
 
                 cv::Mat pw = (cv::Mat_<double>(3, 1) << pt.x, pt.y, pt.z);
@@ -289,8 +305,9 @@ bool ReconstructionPipeline::reconstructWithGroundTruth() {
 
                 double err_i = computeReprojectionError(camParams[i].P, pt, pts_i[k]);
                 double err_j = computeReprojectionError(camParams[j].P, pt, pts_j[k]);
-                if (err_i > 3.0 || err_j > 3.0)
-                    continue; // Nới lỏng để giữ nhiều điểm hợp lệ hơn
+                // Siết chặt sai số chiếu lại từ 3.0 xuống 2.0 để tăng độ chính xác
+                if (err_i > 2.0 || err_j > 2.0)
+                    continue;
 
                 cv::Point2f kpPt = keypoints[i][matches[k].queryIdx].pt;
                 int x = cvRound(kpPt.x), y = cvRound(kpPt.y);
@@ -298,14 +315,18 @@ bool ReconstructionPipeline::reconstructWithGroundTruth() {
                 if (x >= 0 && y >= 0 && x < images[i].cols && y < images[i].rows)
                     color = images[i].at<cv::Vec3b>(y, x);
 
-                points3D.push_back(pt);
-                colors.push_back(color);
+                localPoints.push_back(pt);
+                localColors.push_back(color);
                 ++kept;
             }
             qDebug() << "Pair" << i << "-" << j << "matches=" << matches.size()
                      << "triangulated=" << newPts.size() << "kept=" << kept;
         }
-    }
+
+        std::lock_guard<std::mutex> lock(mtx);
+        points3D.insert(points3D.end(), localPoints.begin(), localPoints.end());
+        colors.insert(colors.end(), localColors.begin(), localColors.end());
+    });
     filterOutliersByDensity(0.02f, 3);
     qDebug() << "=== Total 3D score (ground truth):" << points3D.size() << "===";
     return !points3D.empty();
@@ -545,8 +566,8 @@ bool ReconstructionPipeline::reconstruct() {
         return true;
     }
 
-    // 3. VoxelGrid: leafSize=0.005 (5mm) - an toàn hơn 2mm, tránh heap overflow
-    voxelGridDownsample(0.005f);
+    // 3. VoxelGrid: leafSize=0.001 (1mm) để giữ lại nhiều điểm, hiển thị chi tiết rõ ràng hơn
+    voxelGridDownsample(0.001f);
 
     qDebug() << "Point cloud after processing:" << points3D.size() << "points";
     return true;
