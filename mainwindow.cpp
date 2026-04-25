@@ -135,7 +135,13 @@ MainWindow::MainWindow(QWidget *parent)
       texturePlaneActor(nullptr) {
   ui->setupUi(this);
 
-  QString configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+  // Sử dụng thư mục chứa file thực thi để tìm config.ini
+  QString configPath = QApplication::applicationDirPath() + "/config.ini";
+  if (!QFile::exists(configPath)) {
+      // Fallback về thư mục source nếu không tìm thấy (cho dev)
+      configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+  }
+  
   QSettings settings(configPath, QSettings::IniFormat);
   lastUsedPath = settings.value("Paths/lastUsedPath", "").toString();
 
@@ -264,12 +270,14 @@ MainWindow::~MainWindow() {
 void MainWindow::onLoad2DImages() {
   QString startDir = lastUsedPath.isEmpty() ? "" : lastUsedPath;
   QString fileName = QFileDialog::getOpenFileName(
-      this, "Select 2D Image", "", "Images (*.png *.jpg *.jpeg *.bmp)");
+      this, "Select 2D Image", startDir, "Images (*.png *.jpg *.jpeg *.bmp)");
   if (fileName.isEmpty())
     return;
   lastUsedPath = QFileInfo(fileName).absolutePath();
   current2DImagePath = fileName;
-  QString configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+  QString configPath = QApplication::applicationDirPath() + "/config.ini";
+  if (!QFile::exists(configPath)) configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+  
   QSettings settings(configPath, QSettings::IniFormat);
   settings.setValue("Paths/lastUsedPath", lastUsedPath);
 
@@ -327,7 +335,9 @@ void MainWindow::onLoad3DImages() {
   if (objFileName.isEmpty())
     return;
   lastUsedPath = QFileInfo(objFileName).absolutePath();
-  QString configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+  QString configPath = QApplication::applicationDirPath() + "/config.ini";
+  if (!QFile::exists(configPath)) configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+  
   QSettings settings(configPath, QSettings::IniFormat);
   settings.setValue("Paths/lastUsedPath", lastUsedPath);
 
@@ -353,11 +363,13 @@ void MainWindow::onLoad3DImages() {
 void MainWindow::onLoadMultiple2DImages() {
   QString startDir = lastUsedPath.isEmpty() ? "" : lastUsedPath;
   QStringList files = QFileDialog::getOpenFileNames(
-      this, "Select Images", "", "Images (*.png *.jpg *.bmp)");
+      this, "Select Images", startDir, "Images (*.png *.jpg *.bmp)");
   if (files.isEmpty())
     return;
   lastUsedPath = QFileInfo(files.first()).absolutePath();
-  QString configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+  QString configPath = QApplication::applicationDirPath() + "/config.ini";
+  if (!QFile::exists(configPath)) configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+  
   QSettings settings(configPath, QSettings::IniFormat);
   settings.setValue("Paths/lastUsedPath", lastUsedPath);
 

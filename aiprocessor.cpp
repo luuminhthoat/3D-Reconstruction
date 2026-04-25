@@ -305,10 +305,16 @@ cv::Mat AIProcessor::runSegmentation(const cv::Mat& inputImage) {
             cv::Mat cropped_mask = cv::Mat::zeros(binary_mask.size(), CV_8U);
             binary_mask(valid_box).copyTo(cropped_mask(valid_box));
             
+            // Fill red mask
             color_mask.setTo(cv::Scalar(0, 0, 255), cropped_mask);
+
+            // Draw green contour around the object
+            std::vector<std::vector<cv::Point>> contours;
+            cv::findContours(cropped_mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+            cv::drawContours(resultImage, contours, -1, cv::Scalar(0, 255, 0), 2);
         }
         
-        cv::rectangle(resultImage, box, cv::Scalar(0, 0, 255), 2);
+        // cv::rectangle(resultImage, box, cv::Scalar(0, 0, 255), 2);
     }
     
     cv::addWeighted(resultImage, 1.0, color_mask, 0.5, 0, resultImage);
