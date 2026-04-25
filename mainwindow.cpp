@@ -1,4 +1,4 @@
-﻿#include "mainwindow.h"
+#include "mainwindow.h"
 #include "PanStyle.h"
 #include "ReconstructThread.h"
 #include "reconstructionpipeline.h"
@@ -9,6 +9,7 @@
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QProgressDialog>
+#include <QSettings>
 #include <QTimer>
 #include <QToolBar>
 #include <QVBoxLayout>
@@ -71,31 +72,40 @@ void MainWindow::loadOBJwithMTL(const QString &objPath,
     return;
   }
 
-  vtkNew<vtkOBJImporter> importer;
-  importer->SetFileName(objPath.toStdString().c_str());
-  if (mtlFile.exists())
+  bool imported = false;
+  if (mtlFile.exists()) {
+    vtkNew<vtkOBJImporter> importer;
+    importer->SetFileName(objPath.toStdString().c_str());
     importer->SetFileNameMTL(mtlPath.toStdString().c_str());
-  importer->Update();
+    importer->Update();
 
-  vtkRenderer *importerRenderer = importer->GetRenderer();
-  if (importerRenderer && mtlFile.exists()) {
-    vtkActorCollection *actors = importerRenderer->GetActors();
-    actors->InitTraversal();
-    vtkActor *actor;
-    int actorCount = 0;
-    while ((actor = actors->GetNextActor())) {
-      actor->GetProperty()->SetLighting(true);
-      actor->GetProperty()->SetInterpolationToPhong();
-      actor->GetProperty()->SetAmbient(0.3);
-      actor->GetProperty()->SetDiffuse(0.8);
-      renderer->AddActor(actor);
-      modelActors.push_back(actor);
-      actorCount++;
+    vtkRenderer *importerRenderer = importer->GetRenderer();
+    if (importerRenderer) {
+      vtkActorCollection *actors = importerRenderer->GetActors();
+      actors->InitTraversal();
+      vtkActor *actor;
+      int actorCount = 0;
+      while ((actor = actors->GetNextActor())) {
+        actor->GetProperty()->SetLighting(true);
+        actor->GetProperty()->SetInterpolationToPhong();
+        actor->GetProperty()->SetAmbient(0.3);
+        actor->GetProperty()->SetDiffuse(0.8);
+        renderer->AddActor(actor);
+        modelActors.push_back(actor);
+        actorCount++;
+      }
+      qDebug() << "Actors added from OBJ importer:" << actorCount;
+      imported = true;
     }
-    qDebug() << "Actors added from OBJ importer:" << actorCount;
-  } else {
-    qWarning()
-        << "Importer did not create a renderer. Using OBJReader fallback.";
+  }
+
+  if (!imported) {
+    if (!mtlFile.exists()) {
+      qDebug() << "No MTL file found. Using OBJReader directly.";
+    } else {
+      qWarning()
+          << "Importer did not create a renderer. Using OBJReader fallback.";
+    }
     vtkNew<vtkOBJReader> reader;
     reader->SetFileName(objPath.toStdString().c_str());
     reader->Update();
@@ -116,8 +126,12 @@ void MainWindow::loadOBJwithMTL(const QString &objPath,
 // ------------------------------------------------------------------
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow), pointCloudVisible(false),
-      texturePlaneActor(nullptr), lastUsedPath("") {
+      texturePlaneActor(nullptr) {
   ui->setupUi(this);
+
+  QString configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+  QSettings settings(configPath, QSettings::IniFormat);
+  lastUsedPath = settings.value("Paths/lastUsedPath", "").toString();
 
   vtkWidget = new QVTKOpenGLNativeWidget(this);
   setCentralWidget(vtkWidget);
@@ -220,6 +234,9 @@ void MainWindow::onLoad2DImages() {
   if (fileName.isEmpty())
     return;
   lastUsedPath = QFileInfo(fileName).absolutePath();
+  QString configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+  QSettings settings(configPath, QSettings::IniFormat);
+  settings.setValue("Paths/lastUsedPath", lastUsedPath);
 
   clear3DModel();
   clearPointCloud();
@@ -276,6 +293,9 @@ void MainWindow::onLoad3DImages() {
   if (objFileName.isEmpty())
     return;
   lastUsedPath = QFileInfo(objFileName).absolutePath();
+  QString configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+  QSettings settings(configPath, QSettings::IniFormat);
+  settings.setValue("Paths/lastUsedPath", lastUsedPath);
 
   QFileInfo objInfo(objFileName);
   QString mtlFileName =
@@ -304,6 +324,9 @@ void MainWindow::onLoadMultiple2DImages() {
   if (files.isEmpty())
     return;
   lastUsedPath = QFileInfo(files.first()).absolutePath();
+  QString configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+  QSettings settings(configPath, QSettings::IniFormat);
+  settings.setValue("Paths/lastUsedPath", lastUsedPath);
 
   files.sort();
 
