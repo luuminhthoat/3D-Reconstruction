@@ -584,8 +584,8 @@ std::vector<cv::Vec3b> ReconstructionPipeline::getPointColors() const {
     return colors;
 }
 
-// reconstructionpipeline.cpp
 
+//Sử dụng C++ thuần
 // void ReconstructionPipeline::statisticalOutlierFilter(float meanK,
 //                                                       float stdDevMulThresh)
 //                                                       {
@@ -745,6 +745,7 @@ std::vector<cv::Vec3b> ReconstructionPipeline::getPointColors() const {
 //   colors.swap(newCols);
 // }
 
+//Sử dụng PCL
 // Helper: build a pcl::PointXYZ cloud from our points (no alignment issue)
 static pcl::PointCloud<pcl::PointXYZ>::Ptr
 buildXYZCloud(const std::vector<cv::Point3f> &pts) {

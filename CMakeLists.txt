@@ -28,7 +28,19 @@ find_package(OpenCV REQUIRED)
 set(PCL_DIR "C:/Program Files/PCL 1.15.1/cmake" CACHE PATH "Path to PCL CMake files")
 find_package(PCL REQUIRED COMPONENTS common filters io)
 
-# 4. Eigen3 sẽ tự động được include từ PCL_INCLUDE_DIRS (PCL thường đi kèm Eigen 3.x)
+# 4. Tải ONNX Runtime qua FetchContent
+include(FetchContent)
+set(ONNXRUNTIME_VERSION "1.17.1")
+set(ONNXRUNTIME_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-win-x64-gpu-${ONNXRUNTIME_VERSION}.zip")
+
+FetchContent_Declare(
+  onnxruntime
+  URL ${ONNXRUNTIME_URL}
+)
+FetchContent_GetProperties(onnxruntime)
+if(NOT onnxruntime_POPULATED)
+  FetchContent_Populate(onnxruntime)
+endif()
 
 # 5. Khai báo executable
 qt_add_executable(3D-Reconstruction
@@ -52,6 +64,7 @@ target_include_directories(3D-Reconstruction PRIVATE
     ${VTK_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
     ${PCL_INCLUDE_DIRS}          # <--- Thêm PCL (đã bao gồm Eigen)
+    ${onnxruntime_SOURCE_DIR}/include # <--- Thêm ONNX Runtime
 )
 
 # 7. Định nghĩa compile flags từ VTK và PCL
@@ -70,6 +83,23 @@ target_link_libraries(3D-Reconstruction
         ${VTK_LIBRARIES}
         ${OpenCV_LIBS}
         ${PCL_LIBRARIES}         # <--- Thêm PCL
+        ${onnxruntime_SOURCE_DIR}/lib/onnxruntime.lib # <--- Thêm ONNX Runtime
+)
+
+# Thêm lệnh tự động copy onnxruntime.dll vào thư mục build
+add_custom_command(TARGET 3D-Reconstruction POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${onnxruntime_SOURCE_DIR}/lib/onnxruntime.dll"
+    $<TARGET_FILE_DIR:3D-Reconstruction>
+)
+
+# Copy thêm các provider DLL cho GPU (nếu có)
+add_custom_command(TARGET 3D-Reconstruction POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${onnxruntime_SOURCE_DIR}/lib/onnxruntime_providers_shared.dll"
+    "${onnxruntime_SOURCE_DIR}/lib/onnxruntime_providers_cuda.dll"
+    $<TARGET_FILE_DIR:3D-Reconstruction>
+    || ${CMAKE_COMMAND} -E echo "Some provider DLLs not found, skipping..."
 )
 
 # 9. Cài đặt

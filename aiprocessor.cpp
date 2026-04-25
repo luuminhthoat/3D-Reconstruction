@@ -1,24 +1,49 @@
 #include "aiprocessor.h"
 #include <QDebug>
+#include <opencv2/imgproc.hpp>
+#include <numeric>
+#include <algorithm>
 
-AIProcessor::AIProcessor() : isDetModelLoaded(false), isSegModelLoaded(false) {}
+AIProcessor::AIProcessor() : isDetModelLoaded(false), isSegModelLoaded(false) {
+    env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "AIProcessor");
+    sessionOptions = std::make_unique<Ort::SessionOptions>();
+    sessionOptions->SetIntraOpNumThreads(1);
+    sessionOptions->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+
+    try {
+        auto providers = Ort::GetAvailableProviders();
+        bool cuda_available = false;
+        for (const auto& p : providers) {
+            if (p == "CUDAExecutionProvider") {
+                cuda_available = true;
+                break;
+            }
+        }
+
+        if (cuda_available) {
+            OrtCUDAProviderOptions cuda_options;
+            cuda_options.device_id = 0;
+            sessionOptions->AppendExecutionProvider_CUDA(cuda_options);
+            qDebug() << "ONNX Runtime: Using CUDA Execution Provider (GPU)";
+        } else {
+            qDebug() << "ONNX Runtime: CUDA not found, using CPU fallback";
+        }
+    } catch (const std::exception& e) {
+        qWarning() << "Failed to initialize CUDA provider, falling back to CPU:" << e.what();
+    }
+}
 
 AIProcessor::~AIProcessor() {}
 
 bool AIProcessor::loadDetectionModel(const QString& modelPath) {
     try {
-        detNet = cv::dnn::readNetFromONNX(modelPath.toStdString());
-        isDetModelLoaded = !detNet.empty();
-        if(isDetModelLoaded) {
-            detNet.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
-            detNet.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
-            qDebug() << "Detection model loaded successfully:" << modelPath;
-        } else {
-            qWarning() << "Failed to load detection model:" << modelPath;
-        }
-        return isDetModelLoaded;
-    } catch (const cv::Exception& e) {
-        qWarning() << "OpenCV Exception during loading detection model:" << e.what();
+        std::wstring w_modelPath = modelPath.toStdWString();
+        detSession = std::make_unique<Ort::Session>(*env, w_modelPath.c_str(), *sessionOptions);
+        isDetModelLoaded = true;
+        qDebug() << "Detection model loaded successfully with ORT:" << modelPath;
+        return true;
+    } catch (const Ort::Exception& e) {
+        qWarning() << "ORT Exception during loading detection model:" << e.what();
         isDetModelLoaded = false;
         return false;
     }
@@ -26,18 +51,13 @@ bool AIProcessor::loadDetectionModel(const QString& modelPath) {
 
 bool AIProcessor::loadSegmentationModel(const QString& modelPath) {
     try {
-        segNet = cv::dnn::readNetFromONNX(modelPath.toStdString());
-        isSegModelLoaded = !segNet.empty();
-        if(isSegModelLoaded) {
-            segNet.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
-            segNet.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
-            qDebug() << "Segmentation model loaded successfully:" << modelPath;
-        } else {
-            qWarning() << "Failed to load segmentation model:" << modelPath;
-        }
-        return isSegModelLoaded;
-    } catch (const cv::Exception& e) {
-        qWarning() << "OpenCV Exception during loading segmentation model:" << e.what();
+        std::wstring w_modelPath = modelPath.toStdWString();
+        segSession = std::make_unique<Ort::Session>(*env, w_modelPath.c_str(), *sessionOptions);
+        isSegModelLoaded = true;
+        qDebug() << "Segmentation model loaded successfully with ORT:" << modelPath;
+        return true;
+    } catch (const Ort::Exception& e) {
+        qWarning() << "ORT Exception during loading segmentation model:" << e.what();
         isSegModelLoaded = false;
         return false;
     }
@@ -53,18 +73,41 @@ cv::Mat AIProcessor::runObjectDetection(const cv::Mat& inputImage) {
     const float NMS_THRESHOLD = 0.45f;
     const int INPUT_WIDTH = 640;
     const int INPUT_HEIGHT = 640;
+    const int CHANNELS = 3;
 
-    cv::Mat blob;
-    cv::dnn::blobFromImage(inputImage, blob, 1.0/255.0, cv::Size(INPUT_WIDTH, INPUT_HEIGHT), cv::Scalar(), true, false);
-    detNet.setInput(blob);
+    cv::Mat resizedImage;
+    cv::resize(inputImage, resizedImage, cv::Size(INPUT_WIDTH, INPUT_HEIGHT));
+    cv::cvtColor(resizedImage, resizedImage, cv::COLOR_BGR2RGB);
 
-    std::vector<cv::Mat> outputs;
-    detNet.forward(outputs, detNet.getUnconnectedOutLayersNames());
-
-    cv::Mat outMat = outputs[0];
-    if(outMat.dims == 3) {
-        outMat = cv::Mat(outMat.size[1], outMat.size[2], CV_32F, outMat.ptr<float>());
+    cv::Mat floatImage;
+    resizedImage.convertTo(floatImage, CV_32FC3, 1.0 / 255.0);
+    
+    std::vector<cv::Mat> channels(3);
+    cv::split(floatImage, channels);
+    
+    std::vector<float> inputTensorValues;
+    inputTensorValues.reserve(CHANNELS * INPUT_WIDTH * INPUT_HEIGHT);
+    for (int i = 0; i < 3; ++i) {
+        inputTensorValues.insert(inputTensorValues.end(), (float*)channels[i].data, (float*)channels[i].data + INPUT_WIDTH * INPUT_HEIGHT);
     }
+
+    std::vector<int64_t> inputDims = {1, CHANNELS, INPUT_HEIGHT, INPUT_WIDTH};
+    Ort::MemoryInfo memoryInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    Ort::Value inputTensor = Ort::Value::CreateTensor<float>(memoryInfo, inputTensorValues.data(), inputTensorValues.size(), inputDims.data(), inputDims.size());
+
+    Ort::AllocatorWithDefaultOptions allocator;
+    auto inputNamePtr = detSession->GetInputNameAllocated(0, allocator);
+    const char* inputNames[] = {inputNamePtr.get()};
+    
+    auto outputNamePtr = detSession->GetOutputNameAllocated(0, allocator);
+    const char* outputNames[] = {outputNamePtr.get()};
+
+    auto outputTensors = detSession->Run(Ort::RunOptions{nullptr}, inputNames, &inputTensor, 1, outputNames, 1);
+
+    float* outputData = outputTensors[0].GetTensorMutableData<float>();
+    auto dims = outputTensors[0].GetTensorTypeAndShapeInfo().GetShape(); 
+
+    cv::Mat outMat(dims[1], dims[2], CV_32F, outputData);
     outMat = outMat.t();
 
     int num_preds = outMat.rows;
@@ -107,7 +150,7 @@ cv::Mat AIProcessor::runObjectDetection(const cv::Mat& inputImage) {
     }
 
     std::vector<int> indices;
-    cv::dnn::NMSBoxes(boxes, confidences, SCORE_THRESHOLD, NMS_THRESHOLD, indices);
+    applyNMS(boxes, confidences, SCORE_THRESHOLD, NMS_THRESHOLD, indices);
 
     cv::Mat resultImage = inputImage.clone();
     for (int idx : indices) {
@@ -137,26 +180,55 @@ cv::Mat AIProcessor::runSegmentation(const cv::Mat& inputImage) {
     const float MASK_THRESHOLD = 0.5f;
     const int INPUT_WIDTH = 640;
     const int INPUT_HEIGHT = 640;
+    const int CHANNELS = 3;
 
-    cv::Mat blob;
-    cv::dnn::blobFromImage(inputImage, blob, 1.0/255.0, cv::Size(INPUT_WIDTH, INPUT_HEIGHT), cv::Scalar(), true, false);
-    segNet.setInput(blob);
+    cv::Mat resizedImage;
+    cv::resize(inputImage, resizedImage, cv::Size(INPUT_WIDTH, INPUT_HEIGHT));
+    cv::cvtColor(resizedImage, resizedImage, cv::COLOR_BGR2RGB);
 
-    std::vector<cv::Mat> outputs;
-    segNet.forward(outputs, segNet.getUnconnectedOutLayersNames());
+    cv::Mat floatImage;
+    resizedImage.convertTo(floatImage, CV_32FC3, 1.0 / 255.0);
+
+    std::vector<cv::Mat> channels(3);
+    cv::split(floatImage, channels);
+
+    std::vector<float> inputTensorValues;
+    inputTensorValues.reserve(CHANNELS * INPUT_WIDTH * INPUT_HEIGHT);
+    for (int i = 0; i < 3; ++i) {
+        inputTensorValues.insert(inputTensorValues.end(), (float*)channels[i].data, (float*)channels[i].data + INPUT_WIDTH * INPUT_HEIGHT);
+    }
+
+    std::vector<int64_t> inputDims = {1, CHANNELS, INPUT_HEIGHT, INPUT_WIDTH};
+    Ort::MemoryInfo memoryInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    Ort::Value inputTensor = Ort::Value::CreateTensor<float>(memoryInfo, inputTensorValues.data(), inputTensorValues.size(), inputDims.data(), inputDims.size());
+
+    Ort::AllocatorWithDefaultOptions allocator;
+    auto inputNamePtr = segSession->GetInputNameAllocated(0, allocator);
+    const char* inputNames[] = {inputNamePtr.get()};
+
+    auto outNamePtr0 = segSession->GetOutputNameAllocated(0, allocator);
+    auto outNamePtr1 = segSession->GetOutputNameAllocated(1, allocator);
+    const char* outputNames[] = {outNamePtr0.get(), outNamePtr1.get()};
+
+    auto outputTensors = segSession->Run(Ort::RunOptions{nullptr}, inputNames, &inputTensor, 1, outputNames, 2);
+
+    float* outData0 = outputTensors[0].GetTensorMutableData<float>();
+    auto dims0 = outputTensors[0].GetTensorTypeAndShapeInfo().GetShape();
+    
+    float* outData1 = outputTensors[1].GetTensorMutableData<float>();
+    auto dims1 = outputTensors[1].GetTensorTypeAndShapeInfo().GetShape();
 
     cv::Mat boxes_mat, proto_mat;
-    if (outputs[0].dims == 4) {
-        proto_mat = outputs[0];
-        boxes_mat = outputs[1];
+    if (dims0.size() == 4) {
+        int sizes0[] = { (int)dims0[0], (int)dims0[1], (int)dims0[2], (int)dims0[3] };
+        proto_mat = cv::Mat(4, sizes0, CV_32F, outData0);
+        boxes_mat = cv::Mat(dims1[1], dims1[2], CV_32F, outData1);
     } else {
-        proto_mat = outputs[1];
-        boxes_mat = outputs[0];
+        int sizes1[] = { (int)dims1[0], (int)dims1[1], (int)dims1[2], (int)dims1[3] };
+        proto_mat = cv::Mat(4, sizes1, CV_32F, outData1);
+        boxes_mat = cv::Mat(dims0[1], dims0[2], CV_32F, outData0);
     }
 
-    if(boxes_mat.dims == 3) {
-        boxes_mat = cv::Mat(boxes_mat.size[1], boxes_mat.size[2], CV_32F, boxes_mat.ptr<float>());
-    }
     boxes_mat = boxes_mat.t();
 
     int num_preds = boxes_mat.rows;
@@ -204,7 +276,7 @@ cv::Mat AIProcessor::runSegmentation(const cv::Mat& inputImage) {
     }
 
     std::vector<int> indices;
-    cv::dnn::NMSBoxes(boxes, confidences, SCORE_THRESHOLD, NMS_THRESHOLD, indices);
+    applyNMS(boxes, confidences, SCORE_THRESHOLD, NMS_THRESHOLD, indices);
 
     cv::Mat resultImage = inputImage.clone();
     cv::Mat color_mask = cv::Mat::zeros(resultImage.size(), CV_8UC3);
@@ -242,4 +314,39 @@ cv::Mat AIProcessor::runSegmentation(const cv::Mat& inputImage) {
     cv::addWeighted(resultImage, 1.0, color_mask, 0.5, 0, resultImage);
 
     return resultImage;
+}
+
+void AIProcessor::applyNMS(const std::vector<cv::Rect>& boxes, const std::vector<float>& confidences, 
+                          float scoreThreshold, float nmsThreshold, std::vector<int>& indices) {
+    indices.clear();
+    if (boxes.empty()) return;
+
+    std::vector<int> sorted_indices(boxes.size());
+    std::iota(sorted_indices.begin(), sorted_indices.end(), 0);
+    std::sort(sorted_indices.begin(), sorted_indices.end(), [&](int i, int j) {
+        return confidences[i] > confidences[j];
+    });
+
+    std::vector<bool> is_suppressed(boxes.size(), false);
+
+    for (size_t i = 0; i < sorted_indices.size(); ++i) {
+        int idx1 = sorted_indices[i];
+        if (is_suppressed[idx1]) continue;
+
+        indices.push_back(idx1);
+
+        for (size_t j = i + 1; j < sorted_indices.size(); ++j) {
+            int idx2 = sorted_indices[j];
+            if (is_suppressed[idx2]) continue;
+
+            cv::Rect inter = boxes[idx1] & boxes[idx2];
+            float inter_area = (float)inter.area();
+            float union_area = (float)(boxes[idx1].area() + boxes[idx2].area()) - inter_area;
+            float iou = inter_area / union_area;
+
+            if (iou > nmsThreshold) {
+                is_suppressed[idx2] = true;
+            }
+        }
+    }
 }

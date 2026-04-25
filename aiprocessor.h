@@ -2,9 +2,11 @@
 #define AIPROCESSOR_H
 
 #include <QString>
+#include <QString>
 #include <opencv2/opencv.hpp>
-#include <opencv2/dnn.hpp>
+#include <onnxruntime_cxx_api.h>
 #include <vector>
+#include <memory>
 
 struct AIResult {
     int class_id;
@@ -31,8 +33,14 @@ public:
     cv::Mat runSegmentation(const cv::Mat& inputImage);
 
 private:
-    cv::dnn::Net detNet;
-    cv::dnn::Net segNet;
+    void applyNMS(const std::vector<cv::Rect>& boxes, const std::vector<float>& confidences, 
+                  float scoreThreshold, float nmsThreshold, std::vector<int>& indices);
+    
+    std::unique_ptr<Ort::Env> env;
+    std::unique_ptr<Ort::SessionOptions> sessionOptions;
+    std::unique_ptr<Ort::Session> detSession;
+    std::unique_ptr<Ort::Session> segSession;
+
     bool isDetModelLoaded;
     bool isSegModelLoaded;
 };
