@@ -3,15 +3,21 @@
 #include "ReconstructThread.h"
 #include "reconstructionpipeline.h"
 #include "ui_mainwindow.h"
+#include "aiprocessor.h"
 #include <QApplication>
+#include <QProcess>
 #include <QDebug>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QDir>
+#include <QDateTime>
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QSettings>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
+#include <QMenu>
 #include <QVBoxLayout>
 #include <vtkActor.h>
 #include <vtkActorCollection.h>
@@ -173,24 +179,51 @@ MainWindow::MainWindow(QWidget *parent)
 
   // Toolbar
   QToolBar *toolBar = addToolBar("Reconstruction 3d");
-  QAction *load2dAction = toolBar->addAction("1-Load 2D images");
-  QAction *load3dAction = toolBar->addAction("1-Load 3D images");
-  QAction *loadAction = toolBar->addAction("2-Load multiple 2D images");
-  QAction *reconAction = toolBar->addAction("2-Run Reconstruction");
-  QAction *showAction = toolBar->addAction("2-Show Point Cloud");
-  QAction *clearAction = toolBar->addAction("2-Clear Cloud");
+  
+  // Phase 1 Group
+  QToolButton *btnPhase1 = new QToolButton(this);
+  btnPhase1->setText("Phase 1: Viewer");
+  btnPhase1->setPopupMode(QToolButton::InstantPopup);
+  QMenu *menuPhase1 = new QMenu(btnPhase1);
+  menuPhase1->addAction("Load 2D images", this, &MainWindow::onLoad2DImages);
+  menuPhase1->addAction("Load 3D images", this, &MainWindow::onLoad3DImages);
+  btnPhase1->setMenu(menuPhase1);
+  toolBar->addWidget(btnPhase1);
 
-  connect(load2dAction, &QAction::triggered, this, &MainWindow::onLoad2DImages);
-  connect(load3dAction, &QAction::triggered, this, &MainWindow::onLoad3DImages);
-  connect(loadAction, &QAction::triggered, this,
-          &MainWindow::onLoadMultiple2DImages);
-  connect(reconAction, &QAction::triggered, this,
-          &MainWindow::onRunReconstruction);
-  connect(showAction, &QAction::triggered, this, &MainWindow::onShowPointCloud);
-  connect(clearAction, &QAction::triggered, this,
-          &MainWindow::onClearPointCloud);
+  toolBar->addSeparator();
+
+  // Phase 2 Group
+  QToolButton *btnPhase2 = new QToolButton(this);
+  btnPhase2->setText("Phase 2: Reconstruction");
+  btnPhase2->setPopupMode(QToolButton::InstantPopup);
+  QMenu *menuPhase2 = new QMenu(btnPhase2);
+  menuPhase2->addAction("Load multiple 2D images", this, &MainWindow::onLoadMultiple2DImages);
+  menuPhase2->addAction("Run Reconstruction", this, &MainWindow::onRunReconstruction);
+  menuPhase2->addAction("Show Point Cloud", this, &MainWindow::onShowPointCloud);
+  menuPhase2->addAction("Clear Cloud", this, &MainWindow::onClearPointCloud);
+  btnPhase2->setMenu(menuPhase2);
+  toolBar->addWidget(btnPhase2);
+
+  toolBar->addSeparator();
+
+  // Phase 4 Group
+  QToolButton *btnPhase4 = new QToolButton(this);
+  btnPhase4->setText("Phase 4: AI Processing");
+  btnPhase4->setPopupMode(QToolButton::InstantPopup);
+  QMenu *menuPhase4 = new QMenu(btnPhase4);
+  menuPhase4->addAction("Train AI Model", this, &MainWindow::onTrainModel);
+  menuPhase4->addAction("Object Detection", this, &MainWindow::onObjectDetection);
+  menuPhase4->addAction("Segmentation", this, &MainWindow::onSegmentation);
+  btnPhase4->setMenu(menuPhase4);
+  toolBar->addWidget(btnPhase4);
 
   reconstruction = new ReconstructionPipeline();
+  aiProcessor = new AIProcessor();
+  
+  // Try to load generic models if they exist in a models folder
+  QString modelsPath = QFileInfo(__FILE__).absolutePath() + "/models";
+  aiProcessor->loadDetectionModel(modelsPath + "/yolo11n.onnx");
+  aiProcessor->loadSegmentationModel(modelsPath + "/yolo11n-seg.onnx");
 
   // Mặc định load cube (nếu có)
   QString objPath = "C:/Users/ADMIN/Documents/3D-Reconstruction/3DModels/"
@@ -220,6 +253,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow() {
   delete reconstruction;
+  delete aiProcessor;
   delete ui;
   // delete progressDialog;
 }
@@ -234,6 +268,7 @@ void MainWindow::onLoad2DImages() {
   if (fileName.isEmpty())
     return;
   lastUsedPath = QFileInfo(fileName).absolutePath();
+  current2DImagePath = fileName;
   QString configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
   QSettings settings(configPath, QSettings::IniFormat);
   settings.setValue("Paths/lastUsedPath", lastUsedPath);
@@ -282,8 +317,7 @@ void MainWindow::onLoad2DImages() {
   renderer->ResetCamera();
   vtkWidget->renderWindow()->Render();
 
-  QMessageBox::information(this, "Info",
-                           QString("Đã hiển thị ảnh: %1").arg(fileName));
+  // QMessageBox::information(this, "Info", QString("Đã hiển thị ảnh: %1").arg(fileName));
 }
 
 void MainWindow::onLoad3DImages() {
@@ -313,8 +347,7 @@ void MainWindow::onLoad3DImages() {
   loadOBJwithMTL(objFileName, mtlFileName);
 
   progressDialog->hide();
-  QMessageBox::information(this, "Info",
-                           QString("Đã tải mô hình: %1").arg(objFileName));
+  // QMessageBox::information(this, "Info", QString("Đã tải mô hình: %1").arg(objFileName));
 }
 
 void MainWindow::onLoadMultiple2DImages() {
@@ -479,3 +512,137 @@ void MainWindow::onShowPointCloud() {
 }
 
 void MainWindow::onClearPointCloud() { clearPointCloud(); }
+
+// ------------------------------------------------------------------
+// AI Phase 4 Slots
+// ------------------------------------------------------------------
+void MainWindow::onTrainModel() {
+  QString scriptPath = QFileInfo(__FILE__).absolutePath() + "/train_model.py";
+  if (!QFileInfo::exists(scriptPath)) {
+    QMessageBox::warning(this, "Error", "Training script not found:\n" + scriptPath);
+    return;
+  }
+  
+  // Use QProcess::startDetached to open a new command prompt running the script
+  QProcess::startDetached("cmd.exe", QStringList() << "/c" << "start" << "cmd.exe" << "/k" << "python" << scriptPath);
+}
+
+void MainWindow::onObjectDetection() {
+  if (current2DImagePath.isEmpty()) {
+    QMessageBox::warning(this, "Warning", "Please load a 2D image first!");
+    return;
+  }
+  
+  if (!aiProcessor->isDetectionModelLoaded()) {
+    QMessageBox::warning(this, "AI Model Error", "Detection model not loaded!\nVui lòng chạy '4-Train AI Model' và khởi động lại ứng dụng.");
+    return;
+  }
+
+  cv::Mat inputImage = cv::imread(current2DImagePath.toStdString());
+  cv::Mat resultImage = aiProcessor->runObjectDetection(inputImage);
+  
+  QString predictDir = QFileInfo(__FILE__).absolutePath() + "/Predict/detection";
+  QDir().mkpath(predictDir);
+  QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+  QString savePath = predictDir + "/det_" + timestamp + ".jpg";
+  cv::imwrite(savePath.toStdString(), resultImage);
+  
+  QString tempPath = QFileInfo(__FILE__).absolutePath() + "/temp_ai_result.png";
+  cv::imwrite(tempPath.toStdString(), resultImage);
+  
+  // Use the existing logic to display the temporary result image
+  vtkSmartPointer<vtkPNGReader> reader = vtkSmartPointer<vtkPNGReader>::New();
+  reader->SetFileName(tempPath.toStdString().c_str());
+  reader->Update();
+  
+  clear3DModel();
+  clearPointCloud();
+  clear2DTexture();
+  
+  vtkImageData *imageData = reader->GetOutput();
+  int *dims = imageData->GetDimensions();
+  double aspect = (double)dims[0] / (double)dims[1];
+  
+  vtkNew<vtkPlaneSource> plane;
+  plane->SetOrigin(-aspect / 2.0, -0.5, 0.0);
+  plane->SetPoint1(aspect / 2.0, -0.5, 0.0);
+  plane->SetPoint2(-aspect / 2.0, 0.5, 0.0);
+  plane->SetResolution(1, 1);
+  plane->Update();
+  
+  vtkNew<vtkTexture> texture;
+  texture->SetInputData(imageData);
+  texture->InterpolateOn();
+  
+  vtkNew<vtkPolyDataMapper> planeMapper;
+  planeMapper->SetInputConnection(plane->GetOutputPort());
+  
+  texturePlaneActor = vtkSmartPointer<vtkActor>::New();
+  texturePlaneActor->SetMapper(planeMapper);
+  texturePlaneActor->SetTexture(texture);
+  texturePlaneActor->GetProperty()->SetLighting(false);
+  
+  renderer->AddActor(texturePlaneActor);
+  renderer->ResetCamera();
+  vtkWidget->renderWindow()->Render();
+}
+
+void MainWindow::onSegmentation() {
+  if (current2DImagePath.isEmpty()) {
+    QMessageBox::warning(this, "Warning", "Please load a 2D image first!");
+    return;
+  }
+  
+  if (!aiProcessor->isSegmentationModelLoaded()) {
+    QMessageBox::warning(this, "AI Model Error", "Segmentation model not loaded!\nVui lòng chạy '4-Train AI Model' và khởi động lại ứng dụng.");
+    return;
+  }
+
+  cv::Mat inputImage = cv::imread(current2DImagePath.toStdString());
+  cv::Mat resultImage = aiProcessor->runSegmentation(inputImage);
+  
+  QString predictDir = QFileInfo(__FILE__).absolutePath() + "/Predict/segmentation";
+  QDir().mkpath(predictDir);
+  QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+  QString savePath = predictDir + "/seg_" + timestamp + ".jpg";
+  cv::imwrite(savePath.toStdString(), resultImage);
+  
+  QString tempPath = QFileInfo(__FILE__).absolutePath() + "/temp_ai_result.png";
+  cv::imwrite(tempPath.toStdString(), resultImage);
+  
+  // Display result
+  vtkSmartPointer<vtkPNGReader> reader = vtkSmartPointer<vtkPNGReader>::New();
+  reader->SetFileName(tempPath.toStdString().c_str());
+  reader->Update();
+  
+  clear3DModel();
+  clearPointCloud();
+  clear2DTexture();
+  
+  vtkImageData *imageData = reader->GetOutput();
+  int *dims = imageData->GetDimensions();
+  double aspect = (double)dims[0] / (double)dims[1];
+  
+  vtkNew<vtkPlaneSource> plane;
+  plane->SetOrigin(-aspect / 2.0, -0.5, 0.0);
+  plane->SetPoint1(aspect / 2.0, -0.5, 0.0);
+  plane->SetPoint2(-aspect / 2.0, 0.5, 0.0);
+  plane->SetResolution(1, 1);
+  plane->Update();
+  
+  vtkNew<vtkTexture> texture;
+  texture->SetInputData(imageData);
+  texture->InterpolateOn();
+  
+  vtkNew<vtkPolyDataMapper> planeMapper;
+  planeMapper->SetInputConnection(plane->GetOutputPort());
+  
+  texturePlaneActor = vtkSmartPointer<vtkActor>::New();
+  texturePlaneActor->SetMapper(planeMapper);
+  texturePlaneActor->SetTexture(texture);
+  texturePlaneActor->GetProperty()->SetLighting(false);
+  
+  renderer->AddActor(texturePlaneActor);
+  renderer->ResetCamera();
+  vtkWidget->renderWindow()->Render();
+}

@@ -43,6 +43,8 @@ qt_add_executable(3D-Reconstruction
     reconstructionpipeline.cpp
     reconstructthread.h
     reconstructthread.cpp
+    aiprocessor.h
+    aiprocessor.cpp
 )
 
 # 6. Thêm include directories cho target

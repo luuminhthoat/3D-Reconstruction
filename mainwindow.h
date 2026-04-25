@@ -11,6 +11,7 @@
 #include <QProgressBar>
 
 class ReconstructionPipeline;
+class AIProcessor;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
@@ -31,6 +32,11 @@ private slots:
     void onRunReconstruction();
     void onShowPointCloud();
     void onClearPointCloud();
+    
+    // AI Phase 4 slots
+    void onTrainModel();
+    void onObjectDetection();
+    void onSegmentation();
 
 private:
     void loadOBJwithMTL(const QString &objPath, const QString &mtlPath);
@@ -47,11 +53,13 @@ private:
     vtkSmartPointer<vtkActor> cloudActor;
 
     ReconstructionPipeline *reconstruction;
+    AIProcessor *aiProcessor;
     bool pointCloudVisible;
 
     QProgressDialog *progressDialog;
     QProgressBar *progressBar;
     QString lastUsedPath;   // Lưu đường dẫn mở file gần nhất
+    QString current2DImagePath; // Lưu đường dẫn ảnh 2D hiện tại cho AI
 };
 
 #endif
