@@ -30,7 +30,7 @@ find_package(PCL REQUIRED COMPONENTS common filters io)
 
 # 4. Tải ONNX Runtime qua FetchContent
 include(FetchContent)
-set(ONNXRUNTIME_VERSION "1.17.1")
+set(ONNXRUNTIME_VERSION "1.20.1")
 set(ONNXRUNTIME_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-win-x64-gpu-${ONNXRUNTIME_VERSION}.zip")
 
 FetchContent_Declare(
@@ -102,6 +102,7 @@ add_custom_command(TARGET 3D-Reconstruction POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${onnxruntime_SOURCE_DIR}/lib/onnxruntime_providers_shared.dll"
     "${onnxruntime_SOURCE_DIR}/lib/onnxruntime_providers_cuda.dll"
+    "${onnxruntime_SOURCE_DIR}/lib/onnxruntime_providers_shared.lib"
     $<TARGET_FILE_DIR:3D-Reconstruction>
     || ${CMAKE_COMMAND} -E echo "Some provider DLLs not found, skipping..."
 )
