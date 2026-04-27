@@ -19,6 +19,8 @@
 #include <QToolButton>
 #include <QMenu>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QPushButton>
 #include <vtkActor.h>
 #include <vtkActorCollection.h>
 #include <vtkCellArray.h>
@@ -40,6 +42,8 @@
 #include <vtkTexture.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkVertexGlyphFilter.h>
+#include "image2dloader.h"
+#include "model3dloader.h"
 
 // ------------------------------------------------------------------
 // Hàm trợ giúp
@@ -59,94 +63,50 @@ void MainWindow::clear2DTexture() {
 }
 
 void MainWindow::clearPointCloud() {
-  if (cloudActor && pointCloudVisible) {
+  if (cloudActor) {
     renderer->RemoveActor(cloudActor);
+    cloudActor = nullptr;
     pointCloudVisible = false;
-    vtkWidget->renderWindow()->Render();
   }
 }
 
-void MainWindow::loadOBJwithMTL(const QString &objPath,
-                                const QString &mtlPath) {
-  QFileInfo objFile(objPath);
-  QFileInfo mtlFile(mtlPath);
-  qDebug() << "OBJ exists:" << objFile.exists();
-  qDebug() << "MTL exists:" << mtlFile.exists();
-
-  if (!objFile.exists()) {
-    qWarning() << "OBJ file not found!";
-    return;
-  }
-
-  bool imported = false;
-  if (mtlFile.exists()) {
-    vtkNew<vtkOBJImporter> importer;
-    importer->SetFileName(objPath.toStdString().c_str());
-    importer->SetFileNameMTL(mtlPath.toStdString().c_str());
-    importer->Update();
-
-    vtkRenderer *importerRenderer = importer->GetRenderer();
-    if (importerRenderer) {
-      vtkActorCollection *actors = importerRenderer->GetActors();
-      actors->InitTraversal();
-      vtkActor *actor;
-      int actorCount = 0;
-      while ((actor = actors->GetNextActor())) {
-        actor->GetProperty()->SetLighting(true);
-        actor->GetProperty()->SetInterpolationToPhong();
-        actor->GetProperty()->SetAmbient(0.3);
-        actor->GetProperty()->SetDiffuse(0.8);
+void MainWindow::loadOBJwithMTL(const QString &objPath, const QString &mtlPath) {
+    clear3DModel();
+    modelActors = Model3DLoader::load(objPath, mtlPath);
+    for (auto &actor : modelActors) {
         renderer->AddActor(actor);
-        modelActors.push_back(actor);
-        actorCount++;
-      }
-      qDebug() << "Actors added from OBJ importer:" << actorCount;
-      imported = true;
     }
-  }
-
-  if (!imported) {
-    if (!mtlFile.exists()) {
-      qDebug() << "No MTL file found. Using OBJReader directly.";
-    } else {
-      qWarning()
-          << "Importer did not create a renderer. Using OBJReader fallback.";
-    }
-    vtkNew<vtkOBJReader> reader;
-    reader->SetFileName(objPath.toStdString().c_str());
-    reader->Update();
-    vtkNew<vtkPolyDataMapper> mapper;
-    mapper->SetInputConnection(reader->GetOutputPort());
-    vtkSmartPointer<vtkActor> fallbackActor = vtkSmartPointer<vtkActor>::New();
-    fallbackActor->SetMapper(mapper);
-    fallbackActor->GetProperty()->SetColor(0.7, 0.7, 0.7);
-    renderer->AddActor(fallbackActor);
-    modelActors.push_back(fallbackActor);
-  }
-  renderer->ResetCamera();
-  vtkWidget->renderWindow()->Render();
+    renderer->ResetCamera();
+    vtkWidget->renderWindow()->Render();
 }
+
 
 // ------------------------------------------------------------------
 // Constructor & Destructor
 // ------------------------------------------------------------------
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow), pointCloudVisible(false),
-      texturePlaneActor(nullptr) {
+      texturePlaneActor(nullptr), currentImageIndex(-1), currentAIMode(AIMode::None) {
   ui->setupUi(this);
+
+  // Layout setup for central widget
+  QWidget *central = new QWidget(this);
+  setCentralWidget(central);
+  QVBoxLayout *mainLayout = new QVBoxLayout(central);
+  
+  vtkWidget = new QVTKOpenGLNativeWidget(this);
+  mainLayout->addWidget(vtkWidget);
+
+  setupNavigationUI();
 
   // Sử dụng thư mục chứa file thực thi để tìm config.ini
   QString configPath = QApplication::applicationDirPath() + "/config.ini";
   if (!QFile::exists(configPath)) {
-      // Fallback về thư mục source nếu không tìm thấy (cho dev)
       configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
   }
   
   QSettings settings(configPath, QSettings::IniFormat);
   lastUsedPath = settings.value("Paths/lastUsedPath", "").toString();
-
-  vtkWidget = new QVTKOpenGLNativeWidget(this);
-  setCentralWidget(vtkWidget);
 
   renderer = vtkSmartPointer<vtkRenderer>::New();
   renderer->SetBackground(0.1, 0.2, 0.4);
@@ -170,7 +130,6 @@ MainWindow::MainWindow(QWidget *parent)
   light2->SetIntensity(0.8);
   renderer->AddLight(light2);
 
-  // Tạo progress dialog (sẽ hiển thị khi cần)
   progressDialog = new QProgressDialog(this);
   progressBar = new QProgressBar(progressDialog);
   progressBar->setFixedHeight(50);
@@ -205,8 +164,12 @@ MainWindow::MainWindow(QWidget *parent)
   QMenu *menuPhase2 = new QMenu(btnPhase2);
   menuPhase2->addAction("Load multiple 2D images", this, &MainWindow::onLoadMultiple2DImages);
   menuPhase2->addAction("Run Reconstruction", this, &MainWindow::onRunReconstruction);
-  menuPhase2->addAction("Show Point Cloud", this, &MainWindow::onShowPointCloud);
-  menuPhase2->addAction("Clear Cloud", this, &MainWindow::onClearPointCloud);
+  
+  QMenu *menuCloud = menuPhase2->addMenu("Point Cloud");
+  actShowCloud = menuCloud->addAction("Show Point Cloud", this, &MainWindow::onShowPointCloud);
+  actHideCloud = menuCloud->addAction("Hide Point Cloud", this, &MainWindow::onHidePointCloud);
+  actHideCloud->setEnabled(false);
+
   btnPhase2->setMenu(menuPhase2);
   toolBar->addWidget(btnPhase2);
 
@@ -218,43 +181,44 @@ MainWindow::MainWindow(QWidget *parent)
   btnPhase4->setPopupMode(QToolButton::InstantPopup);
   QMenu *menuPhase4 = new QMenu(btnPhase4);
   menuPhase4->addAction("Train AI Model", this, &MainWindow::onTrainModel);
-  menuPhase4->addAction("Object Detection", this, &MainWindow::onObjectDetection);
-  menuPhase4->addAction("Segmentation", this, &MainWindow::onSegmentation);
+  
+  QMenu *menuDet = menuPhase4->addMenu("Object Detection");
+  actRunDet = menuDet->addAction("Run Detection", this, &MainWindow::onObjectDetection);
+  actHideDet = menuDet->addAction("Hide Detection", this, &MainWindow::onHideAIResults);
+  actHideDet->setEnabled(false);
+
+  QMenu *menuSeg = menuPhase4->addMenu("Segmentation");
+  actRunSeg = menuSeg->addAction("Run Segmentation", this, &MainWindow::onSegmentation);
+  actHideSeg = menuSeg->addAction("Hide Segmentation", this, &MainWindow::onHideAIResults);
+  actHideSeg->setEnabled(false);
+
   btnPhase4->setMenu(menuPhase4);
   toolBar->addWidget(btnPhase4);
 
   reconstruction = new ReconstructionPipeline();
   aiProcessor = new AIProcessor();
   
-  // Try to load generic models if they exist in a models folder
   QString modelsPath = QFileInfo(__FILE__).absolutePath() + "/models";
   aiProcessor->loadDetectionModel(modelsPath + "/yolo11n.onnx");
   aiProcessor->loadSegmentationModel(modelsPath + "/yolo11n-seg.onnx");
 
-  // Mặc định load cube (nếu có)
-  QString objPath = "C:/Users/ADMIN/Documents/3D-Reconstruction/3DModels/"
-                    "85-cottage_obj/cube.obj";
-  QString mtlPath = "C:/Users/ADMIN/Documents/3D-Reconstruction/3DModels/"
-                    "85-cottage_obj/cube.mtl";
+  QString objPath = "C:/Users/ADMIN/Documents/3D-Reconstruction/3DModels/85-cottage_obj/cube.obj";
+  QString mtlPath = "C:/Users/ADMIN/Documents/3D-Reconstruction/3DModels/85-cottage_obj/cube.mtl";
   if (QFileInfo::exists(objPath)) {
     loadOBJwithMTL(objPath, mtlPath);
-  } else {
-    qDebug() << "Default cube not found, starting with empty scene.";
   }
 
-  // Interactor style
-  vtkRenderWindowInteractor *interactor =
-      vtkWidget->renderWindow()->GetInteractor();
-  if (!interactor) {
-    interactor = vtkRenderWindowInteractor::New();
-    vtkWidget->renderWindow()->SetInteractor(interactor);
-    interactor->Delete();
-  }
-  vtkNew<PanStyle> style;
-  interactor->SetInteractorStyle(style);
-  interactor->Initialize();
+    vtkRenderWindowInteractor *interactor = vtkWidget->renderWindow()->GetInteractor();
+    if (!interactor) {
+        interactor = vtkRenderWindowInteractor::New();
+        vtkWidget->renderWindow()->SetInteractor(interactor);
+    }
+    
+    vtkNew<PanStyle> style;
+    interactor->SetInteractorStyle(style);
+    interactor->Initialize();
 
-  renderer->ResetCamera();
+    renderer->ResetCamera();
 }
 
 MainWindow::~MainWindow() {
@@ -285,47 +249,25 @@ void MainWindow::onLoad2DImages() {
   clearPointCloud();
   clear2DTexture();
 
-  vtkSmartPointer<vtkImageReader2> reader;
-  if (fileName.endsWith(".png", Qt::CaseInsensitive)) {
-    reader = vtkSmartPointer<vtkPNGReader>::New();
-  } else {
-    reader = vtkSmartPointer<vtkJPEGReader>::New();
+  currentAIMode = AIMode::None;
+  updateMenuStates();
+
+  texturePlaneActor = Image2DLoader::load(fileName);
+  if (texturePlaneActor) {
+      renderer->AddActor(texturePlaneActor);
+      renderer->ResetCamera();
+      vtkWidget->renderWindow()->Render();
+      
+      // Update image list for navigation
+      QFileInfo fileInfo(fileName);
+      QDir dir = fileInfo.dir();
+      QStringList filters;
+      filters << "*.png" << "*.jpg" << "*.jpeg" << "*.bmp";
+      imageFileList = dir.entryList(filters, QDir::Files, QDir::Name);
+      currentImageIndex = imageFileList.indexOf(fileInfo.fileName());
+      
+      updateNavigationButtons();
   }
-  reader->SetFileName(fileName.toStdString().c_str());
-  reader->Update();
-
-  vtkImageData *imageData = reader->GetOutput();
-  int *dims = imageData->GetDimensions();
-  int width = dims[0];
-  int height = dims[1];
-  double aspect = (double)width / (double)height;
-
-  double planeWidth = aspect;
-  double planeHeight = 1.0;
-  vtkNew<vtkPlaneSource> plane;
-  plane->SetOrigin(-planeWidth / 2.0, -planeHeight / 2.0, 0.0);
-  plane->SetPoint1(planeWidth / 2.0, -planeHeight / 2.0, 0.0);
-  plane->SetPoint2(-planeWidth / 2.0, planeHeight / 2.0, 0.0);
-  plane->SetResolution(1, 1);
-  plane->Update();
-
-  vtkNew<vtkTexture> texture;
-  texture->SetInputData(imageData);
-  texture->InterpolateOn();
-
-  vtkNew<vtkPolyDataMapper> planeMapper;
-  planeMapper->SetInputConnection(plane->GetOutputPort());
-
-  texturePlaneActor = vtkSmartPointer<vtkActor>::New();
-  texturePlaneActor->SetMapper(planeMapper);
-  texturePlaneActor->SetTexture(texture);
-  texturePlaneActor->GetProperty()->SetLighting(false);
-
-  renderer->AddActor(texturePlaneActor);
-  renderer->ResetCamera();
-  vtkWidget->renderWindow()->Render();
-
-  // QMessageBox::information(this, "Info", QString("Đã hiển thị ảnh: %1").arg(fileName));
 }
 
 void MainWindow::onLoad3DImages() {
@@ -334,30 +276,21 @@ void MainWindow::onLoad3DImages() {
       this, "Select OBJ file", startDir, "OBJ Files (*.obj)");
   if (objFileName.isEmpty())
     return;
-  lastUsedPath = QFileInfo(objFileName).absolutePath();
+
+  QFileInfo objInfo(objFileName);
+  QString mtlFileName = objInfo.path() + "/" + objInfo.completeBaseName() + ".mtl";
+
+  lastUsedPath = objInfo.absolutePath();
   QString configPath = QApplication::applicationDirPath() + "/config.ini";
   if (!QFile::exists(configPath)) configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
   
   QSettings settings(configPath, QSettings::IniFormat);
   settings.setValue("Paths/lastUsedPath", lastUsedPath);
 
-  QFileInfo objInfo(objFileName);
-  QString mtlFileName =
-      objInfo.path() + "/" + objInfo.completeBaseName() + ".mtl";
-
-  progressDialog->setLabelText("Loading 3D model...");
-  progressDialog->setRange(0, 0); // indeterminate
-  progressDialog->setMinimumSize(500, 200);
-  progressDialog->show();
-  QApplication::processEvents();
-
   clear3DModel();
   clearPointCloud();
   clear2DTexture();
   loadOBJwithMTL(objFileName, mtlFileName);
-
-  progressDialog->hide();
-  // QMessageBox::information(this, "Info", QString("Đã tải mô hình: %1").arg(objFileName));
 }
 
 void MainWindow::onLoadMultiple2DImages() {
@@ -478,9 +411,6 @@ void MainWindow::onShowPointCloud() {
     return;
   }
 
-  qDebug() << "Showing point cloud: points=" << pts.size()
-           << ", colors=" << colors.size();
-
   clear3DModel();
   clearPointCloud();
 
@@ -521,9 +451,14 @@ void MainWindow::onShowPointCloud() {
   renderer->ResetCamera();
   vtkWidget->renderWindow()->Render();
   pointCloudVisible = true;
+  updateMenuStates();
 }
 
-void MainWindow::onClearPointCloud() { clearPointCloud(); }
+void MainWindow::onHidePointCloud() {
+    clearPointCloud();
+    updateMenuStates();
+    vtkWidget->renderWindow()->Render();
+}
 
 // ------------------------------------------------------------------
 // AI Phase 4 Slots
@@ -534,127 +469,134 @@ void MainWindow::onTrainModel() {
     QMessageBox::warning(this, "Error", "Training script not found:\n" + scriptPath);
     return;
   }
-  
-  // Use QProcess::startDetached to open a new command prompt running the script
   QProcess::startDetached("cmd.exe", QStringList() << "/c" << "start" << "cmd.exe" << "/k" << "python" << scriptPath);
 }
 
 void MainWindow::onObjectDetection() {
-  if (current2DImagePath.isEmpty()) {
-    QMessageBox::warning(this, "Warning", "Please load a 2D image first!");
-    return;
-  }
-  
-  if (!aiProcessor->isDetectionModelLoaded()) {
-    QMessageBox::warning(this, "AI Model Error", "Detection model not loaded!\nVui lòng chạy '4-Train AI Model' và khởi động lại ứng dụng.");
-    return;
-  }
+  if (current2DImagePath.isEmpty()) return;
+  if (!aiProcessor->isDetectionModelLoaded()) return;
 
   cv::Mat inputImage = cv::imread(current2DImagePath.toStdString());
   cv::Mat resultImage = aiProcessor->runObjectDetection(inputImage);
   
-  QString predictDir = QFileInfo(__FILE__).absolutePath() + "/Predict/detection";
-  QDir().mkpath(predictDir);
-  QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
-  QString savePath = predictDir + "/det_" + timestamp + ".jpg";
-  cv::imwrite(savePath.toStdString(), resultImage);
-  
-  QString tempPath = QFileInfo(__FILE__).absolutePath() + "/temp_ai_result.png";
+  QString tempPath = QApplication::applicationDirPath() + "/temp_ai_result.png";
   cv::imwrite(tempPath.toStdString(), resultImage);
   
-  // Use the existing logic to display the temporary result image
-  vtkSmartPointer<vtkPNGReader> reader = vtkSmartPointer<vtkPNGReader>::New();
-  reader->SetFileName(tempPath.toStdString().c_str());
-  reader->Update();
-  
-  clear3DModel();
-  clearPointCloud();
   clear2DTexture();
-  
-  vtkImageData *imageData = reader->GetOutput();
-  int *dims = imageData->GetDimensions();
-  double aspect = (double)dims[0] / (double)dims[1];
-  
-  vtkNew<vtkPlaneSource> plane;
-  plane->SetOrigin(-aspect / 2.0, -0.5, 0.0);
-  plane->SetPoint1(aspect / 2.0, -0.5, 0.0);
-  plane->SetPoint2(-aspect / 2.0, 0.5, 0.0);
-  plane->SetResolution(1, 1);
-  plane->Update();
-  
-  vtkNew<vtkTexture> texture;
-  texture->SetInputData(imageData);
-  texture->InterpolateOn();
-  
-  vtkNew<vtkPolyDataMapper> planeMapper;
-  planeMapper->SetInputConnection(plane->GetOutputPort());
-  
-  texturePlaneActor = vtkSmartPointer<vtkActor>::New();
-  texturePlaneActor->SetMapper(planeMapper);
-  texturePlaneActor->SetTexture(texture);
-  texturePlaneActor->GetProperty()->SetLighting(false);
-  
-  renderer->AddActor(texturePlaneActor);
-  renderer->ResetCamera();
-  vtkWidget->renderWindow()->Render();
+  texturePlaneActor = Image2DLoader::load(tempPath);
+  if (texturePlaneActor) {
+      renderer->AddActor(texturePlaneActor);
+      renderer->ResetCamera();
+      vtkWidget->renderWindow()->Render();
+  }
+  currentAIMode = AIMode::Detection;
+  updateMenuStates();
 }
 
 void MainWindow::onSegmentation() {
-  if (current2DImagePath.isEmpty()) {
-    QMessageBox::warning(this, "Warning", "Please load a 2D image first!");
-    return;
-  }
-  
-  if (!aiProcessor->isSegmentationModelLoaded()) {
-    QMessageBox::warning(this, "AI Model Error", "Segmentation model not loaded!\nVui lòng chạy '4-Train AI Model' và khởi động lại ứng dụng.");
-    return;
-  }
+  if (current2DImagePath.isEmpty()) return;
+  if (!aiProcessor->isSegmentationModelLoaded()) return;
 
   cv::Mat inputImage = cv::imread(current2DImagePath.toStdString());
   cv::Mat resultImage = aiProcessor->runSegmentation(inputImage);
   
-  QString predictDir = QFileInfo(__FILE__).absolutePath() + "/Predict/segmentation";
-  QDir().mkpath(predictDir);
-  QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
-  QString savePath = predictDir + "/seg_" + timestamp + ".jpg";
-  cv::imwrite(savePath.toStdString(), resultImage);
-  
-  QString tempPath = QFileInfo(__FILE__).absolutePath() + "/temp_ai_result.png";
+  QString tempPath = QApplication::applicationDirPath() + "/temp_ai_result.png";
   cv::imwrite(tempPath.toStdString(), resultImage);
   
-  // Display result
-  vtkSmartPointer<vtkPNGReader> reader = vtkSmartPointer<vtkPNGReader>::New();
-  reader->SetFileName(tempPath.toStdString().c_str());
-  reader->Update();
-  
-  clear3DModel();
-  clearPointCloud();
   clear2DTexture();
-  
-  vtkImageData *imageData = reader->GetOutput();
-  int *dims = imageData->GetDimensions();
-  double aspect = (double)dims[0] / (double)dims[1];
-  
-  vtkNew<vtkPlaneSource> plane;
-  plane->SetOrigin(-aspect / 2.0, -0.5, 0.0);
-  plane->SetPoint1(aspect / 2.0, -0.5, 0.0);
-  plane->SetPoint2(-aspect / 2.0, 0.5, 0.0);
-  plane->SetResolution(1, 1);
-  plane->Update();
-  
-  vtkNew<vtkTexture> texture;
-  texture->SetInputData(imageData);
-  texture->InterpolateOn();
-  
-  vtkNew<vtkPolyDataMapper> planeMapper;
-  planeMapper->SetInputConnection(plane->GetOutputPort());
-  
-  texturePlaneActor = vtkSmartPointer<vtkActor>::New();
-  texturePlaneActor->SetMapper(planeMapper);
-  texturePlaneActor->SetTexture(texture);
-  texturePlaneActor->GetProperty()->SetLighting(false);
-  
-  renderer->AddActor(texturePlaneActor);
-  renderer->ResetCamera();
-  vtkWidget->renderWindow()->Render();
+  texturePlaneActor = Image2DLoader::load(tempPath);
+  if (texturePlaneActor) {
+      renderer->AddActor(texturePlaneActor);
+      renderer->ResetCamera();
+      vtkWidget->renderWindow()->Render();
+  }
+  currentAIMode = AIMode::Segmentation;
+  updateMenuStates();
+}
+
+void MainWindow::onHideAIResults() {
+    currentAIMode = AIMode::None;
+    if (!current2DImagePath.isEmpty()) {
+        clear2DTexture();
+        texturePlaneActor = Image2DLoader::load(current2DImagePath);
+        if (texturePlaneActor) {
+            renderer->AddActor(texturePlaneActor);
+            vtkWidget->renderWindow()->Render();
+        }
+    }
+    updateMenuStates();
+}
+
+void MainWindow::setupNavigationUI() {
+    QWidget *navWidget = new QWidget(this);
+    QHBoxLayout *navLayout = new QHBoxLayout(navWidget);
+    
+    // Thu hẹp khoảng cách để vùng view lớn hơn
+    navLayout->setContentsMargins(5, 5, 5, 5);
+    navLayout->setSpacing(10);
+    navWidget->setFixedHeight(40); // Cố định chiều cao thanh điều hướng
+    
+    btnPrev = new QPushButton("Prev", this);
+    btnNext = new QPushButton("Next", this);
+    
+    btnPrev->setEnabled(false);
+    btnNext->setEnabled(false);
+    
+    navLayout->addStretch(); // Đẩy nút vào giữa
+    navLayout->addWidget(btnPrev);
+    navLayout->addWidget(btnNext);
+    navLayout->addStretch();
+    
+    qobject_cast<QVBoxLayout*>(centralWidget()->layout())->addWidget(navWidget);
+    
+    connect(btnPrev, &QPushButton::clicked, this, &MainWindow::onPrevImage);
+    connect(btnNext, &QPushButton::clicked, this, &MainWindow::onNextImage);
+}
+
+void MainWindow::onNextImage() {
+    if (currentImageIndex < imageFileList.size() - 1) {
+        currentImageIndex++;
+        loadCurrentIndexImage();
+    }
+}
+
+void MainWindow::onPrevImage() {
+    if (currentImageIndex > 0) {
+        currentImageIndex--;
+        loadCurrentIndexImage();
+    }
+}
+
+void MainWindow::loadCurrentIndexImage() {
+    QString folder = QFileInfo(current2DImagePath).absolutePath();
+    QString newPath = folder + "/" + imageFileList[currentImageIndex];
+    current2DImagePath = newPath;
+    
+    clear2DTexture();
+    texturePlaneActor = Image2DLoader::load(newPath);
+    if (texturePlaneActor) {
+        renderer->AddActor(texturePlaneActor);
+        
+        if (currentAIMode == AIMode::Detection) onObjectDetection();
+        else if (currentAIMode == AIMode::Segmentation) onSegmentation();
+        
+        vtkWidget->renderWindow()->Render();
+    }
+    updateNavigationButtons();
+}
+
+void MainWindow::updateNavigationButtons() {
+    btnPrev->setEnabled(currentImageIndex > 0);
+    btnNext->setEnabled(currentImageIndex >= 0 && currentImageIndex < imageFileList.size() - 1);
+}
+
+void MainWindow::updateMenuStates() {
+    actShowCloud->setEnabled(!pointCloudVisible);
+    actHideCloud->setEnabled(pointCloudVisible);
+    
+    actRunDet->setEnabled(currentAIMode != AIMode::Detection);
+    actHideDet->setEnabled(currentAIMode == AIMode::Detection);
+    
+    actRunSeg->setEnabled(currentAIMode != AIMode::Segmentation);
+    actHideSeg->setEnabled(currentAIMode == AIMode::Segmentation);
 }

@@ -12,6 +12,10 @@
 
 class ReconstructionPipeline;
 class AIProcessor;
+class Image2DLoader;
+class Model3DLoader;
+class QPushButton;
+class QAction;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
@@ -31,12 +35,15 @@ private slots:
     void onLoadMultiple2DImages();
     void onRunReconstruction();
     void onShowPointCloud();
-    void onClearPointCloud();
+    void onHidePointCloud();
+    void onNextImage();
+    void onPrevImage();
     
     // AI Phase 4 slots
     void onTrainModel();
     void onObjectDetection();
     void onSegmentation();
+    void onHideAIResults();
 
 private:
     void loadOBJwithMTL(const QString &objPath, const QString &mtlPath);
@@ -58,8 +65,30 @@ private:
 
     QProgressDialog *progressDialog;
     QProgressBar *progressBar;
-    QString lastUsedPath;   // Lưu đường dẫn mở file gần nhất
-    QString current2DImagePath; // Lưu đường dẫn ảnh 2D hiện tại cho AI
+    QString lastUsedPath;
+    QString current2DImagePath;
+
+    // Menu Actions for toggling
+    QAction *actShowCloud;
+    QAction *actHideCloud;
+    QAction *actRunDet;
+    QAction *actHideDet;
+    QAction *actRunSeg;
+    QAction *actHideSeg;
+
+    // Navigation
+    QPushButton *btnPrev;
+    QPushButton *btnNext;
+    QStringList imageFileList;
+    int currentImageIndex;
+
+    enum class AIMode { None, Detection, Segmentation };
+    AIMode currentAIMode;
+
+    void updateMenuStates();
+    void updateNavigationButtons();
+    void loadCurrentIndexImage();
+    void setupNavigationUI();
 };
 
 #endif

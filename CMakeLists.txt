@@ -57,6 +57,10 @@ qt_add_executable(3D-Reconstruction
     reconstructthread.cpp
     aiprocessor.h
     aiprocessor.cpp
+    image2dloader.h
+    image2dloader.cpp
+    model3dloader.h
+    model3dloader.cpp
 )
 
 # 6. Thêm include directories cho target
