@@ -173,21 +173,21 @@ vtkSmartPointer<vtkImageActor> DicomLoader::createSlice(
 
     // Ma trận reslice chuẩn y khoa (RAS)
     static const double kAxes[3][16] = {
-        // Sagittal (0): nhìn từ phải sang, cắt dọc trục X
-        { 0, 1, 0, 0,
-         0, 0,-1, 0,
-         1, 0, 0, 0,
-         0, 0, 0, 1 },
-        // Coronal (1): nhìn từ trước ra sau, cắt dọc trục Y
-        { 1, 0, 0, 0,
-         0, 0,-1, 0,
-         0, 1, 0, 0,
-         0, 0, 0, 1 },
-        // Axial (2): nhìn từ trên xuống, cắt ngang trục Z
-        { 1, 0, 0, 0,
-         0,-1, 0, 0,
-         0, 0, 1, 0,
-         0, 0, 0, 1 }
+        // Sagittal (0): Anterior -> Posterior (Y-), Superior -> Inferior (Z+)
+        { 0, 0, 1, 0,
+         -1, 0, 0, 0,
+          0, 1, 0, 0,
+          0, 0, 0, 1 },
+        // Coronal (1): Left -> Right (X-), Superior -> Inferior (Z+)
+        { -1, 0, 0, 0,
+           0, 0, 1, 0,
+           0, 1, 0, 0,
+           0, 0, 0, 1 },
+        // Axial (2): Left -> Right (X-), Anterior -> Posterior (Y-)
+        { -1, 0, 0, 0,
+           0,-1, 0, 0,
+           0, 0, 1, 0,
+           0, 0, 0, 1 }
     };
 
     vtkNew<vtkMatrix4x4> axes;
@@ -220,7 +220,10 @@ vtkSmartPointer<vtkVolume> DicomLoader::createVolume(
 
     vtkNew<vtkFixedPointVolumeRayCastMapper> mapper;
     mapper->SetInputData(data);
-    mapper->SetBlendModeToMaximumIntensity(); // MIP
+    mapper->SetAutoAdjustSampleDistances(1); 
+    mapper->SetInteractiveSampleDistance(1.5); // Khi xoay: nhanh, hơi nhòe chút
+    mapper->SetSampleDistance(0.5);            // Khi dừng: rất nét
+    mapper->SetBlendModeToMaximumIntensity(); 
 
     // Màu: đen → nâu (mô mềm) → kem (não) → trắng
     vtkNew<vtkColorTransferFunction> color;

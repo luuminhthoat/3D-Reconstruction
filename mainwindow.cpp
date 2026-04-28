@@ -693,9 +693,9 @@ void MainWindow::onLoadDicom() {
         ren->ResetCamera();
     };
 
-    setupCam(axialRenderer,     0,  0,  1,  0, -1,  0);  // Z+ (từ trên xuống)
-    setupCam(sagittalRenderer, -1,  0,  0,  0,  0,  1);  // X- (từ trái sang)
-    setupCam(coronalRenderer,   0, -1,  0,  0,  0,  1);  // Y- (từ trước ra)
+    setupCam(axialRenderer,     0,  0,  1,  0, -1,  0);  // Nhìn Z+, Up là Y- (Anterior) -> Giống IMAIOS
+    setupCam(sagittalRenderer,  0,  0,  1,  0,  1,  0);  // Nhìn Z+, Up là Y+ (Superior của ảnh reslice)
+    setupCam(coronalRenderer,   0,  0,  1,  0,  1,  0);  // Nhìn Z+, Up là Y+ (Superior của ảnh reslice)
 
     {
         vtkCamera* cam = renderer->GetActiveCamera();
