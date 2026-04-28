@@ -18,6 +18,12 @@ find_package(VTK REQUIRED COMPONENTS
     IOGeometry
     IOImport
     FiltersCore
+    IOImage
+    RenderingCore
+    ImagingCore
+    RenderingVolume
+    RenderingVolumeOpenGL2
+    # IODICOM
 )
 
 # 3. Tìm OpenCV (cần cho phase 2)
@@ -61,6 +67,8 @@ qt_add_executable(3D-Reconstruction
     image2dloader.cpp
     model3dloader.h
     model3dloader.cpp
+    dicomloader.h
+    dicomloader.cpp
 )
 
 # 6. Thêm include directories cho target
@@ -102,9 +110,9 @@ add_custom_command(TARGET 3D-Reconstruction POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${onnxruntime_SOURCE_DIR}/lib/onnxruntime_providers_shared.dll"
     "${onnxruntime_SOURCE_DIR}/lib/onnxruntime_providers_cuda.dll"
+    "${onnxruntime_SOURCE_DIR}/lib/onnxruntime_providers_tensorrt.dll"
     "${onnxruntime_SOURCE_DIR}/lib/onnxruntime_providers_shared.lib"
     $<TARGET_FILE_DIR:3D-Reconstruction>
-    || ${CMAKE_COMMAND} -E echo "Some provider DLLs not found, skipping..."
 )
 
 # 9. Cài đặt

@@ -1,4 +1,6 @@
 #include "mainwindow.h"
+#include <QDebug>
+#include <algorithm>
 #include "PanStyle.h"
 #include "ReconstructThread.h"
 #include "reconstructionpipeline.h"
@@ -44,6 +46,19 @@
 #include <vtkVertexGlyphFilter.h>
 #include "image2dloader.h"
 #include "model3dloader.h"
+#include "dicomloader.h"
+#include <vtkCamera.h>
+#include <vtkImageData.h>
+#include <vtkCornerAnnotation.h>
+#include <vtkLineSource.h>
+#include <vtkPolyDataMapper2D.h>
+#include <vtkActor2D.h>
+#include <vtkProperty2D.h>
+#include <vtkCoordinate.h>
+#include <vtkTextProperty.h>
+#include <vtkLineSource.h>
+#include <vtkLineSource.h>
+#include <vtkDICOMImageReader.h>
 
 // ------------------------------------------------------------------
 // Hàm trợ giúp
@@ -86,8 +101,12 @@ void MainWindow::loadOBJwithMTL(const QString &objPath, const QString &mtlPath) 
 // ------------------------------------------------------------------
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow), pointCloudVisible(false),
-      texturePlaneActor(nullptr), currentImageIndex(-1), currentAIMode(AIMode::None) {
+      texturePlaneActor(nullptr), currentImageIndex(-1), currentAIMode(AIMode::None),
+      isAutoNext(true) {
   ui->setupUi(this);
+
+  autoTimer = new QTimer(this);
+  connect(autoTimer, &QTimer::timeout, this, &MainWindow::onAutoTimerTimeout);
 
   // Layout setup for central widget
   QWidget *central = new QWidget(this);
@@ -152,6 +171,7 @@ MainWindow::MainWindow(QWidget *parent)
   QMenu *menuPhase1 = new QMenu(btnPhase1);
   menuPhase1->addAction("Load 2D images", this, &MainWindow::onLoad2DImages);
   menuPhase1->addAction("Load 3D images", this, &MainWindow::onLoad3DImages);
+  menuPhase1->addAction("Load 2D DICOM", this, &MainWindow::onLoadDicom);
   btnPhase1->setMenu(menuPhase1);
   toolBar->addWidget(btnPhase1);
 
@@ -511,7 +531,201 @@ void MainWindow::onSegmentation() {
       vtkWidget->renderWindow()->Render();
   }
   currentAIMode = AIMode::Segmentation;
-  updateMenuStates();
+    updateMenuStates();
+}
+
+// ================================================================
+// THAY THẾ TOÀN BỘ HÀM onLoadDicom() trong mainwindow.cpp
+//
+// Thêm vào phần #include ở đầu mainwindow.cpp:
+//   #include <algorithm>          // std::max
+//   #include <vtkImageData.h>     // nếu chưa có
+// ================================================================
+
+void MainWindow::onLoadDicom() {
+    QString fileName = QFileDialog::getOpenFileName(
+        this, "Select a DICOM file", lastUsedPath, "DICOM (*.dcm *.dicom)");
+    if (fileName.isEmpty()) return;
+
+    QFileInfo fileInfo(fileName);
+    QString dirPath = fileInfo.absolutePath();
+    lastUsedPath = dirPath;
+    qDebug() << "DICOM Load triggered for path:" << dirPath;
+
+    // ============================================================
+    // 1. Nạp series - trả về vtkImageData (đã ghép đủ slices)
+    // ============================================================
+    auto volumeData = DicomLoader::loadSeries(dirPath);
+    if (!volumeData || volumeData->GetNumberOfPoints() < 1) {
+        QMessageBox::critical(this, "Error",
+                              "Không thể đọc DICOM từ:\n" + dirPath +
+                                  "\n\nKiểm tra thư mục có chứa file .dcm không.");
+        return;
+    }
+
+    // ============================================================
+    // 2. Tính Window/Level từ range thực tế
+    //    MicroDicom báo WL=2373 WW=4746 → dùng làm chuẩn
+    // ============================================================
+    double range[2];
+    volumeData->GetScalarRange(range);
+    qDebug() << "Data Range:" << range[0] << "to" << range[1];
+
+    double window, level;
+    double span = range[1] - range[0];
+    if (span < 500) {
+        // 8-bit hoặc dải hẹp
+        window = span;
+        level  = (range[0] + range[1]) / 2.0;
+    } else {
+        // 16-bit DICOM: dùng WW/WL chuẩn lấy từ MicroDicom
+        window = 4746.0;
+        level  = 2373.0;
+    }
+    qDebug() << "Window:" << window << "Level:" << level;
+
+    // ============================================================
+    // 3. Clear và thiết lập lại renderers
+    // ============================================================
+    clear3DModel();
+    clear2DTexture();
+    clearPointCloud();
+    renderer->RemoveAllViewProps();
+
+    if (!axialRenderer)    axialRenderer    = vtkSmartPointer<vtkRenderer>::New();
+    if (!sagittalRenderer) sagittalRenderer = vtkSmartPointer<vtkRenderer>::New();
+    if (!coronalRenderer)  coronalRenderer  = vtkSmartPointer<vtkRenderer>::New();
+
+    axialRenderer->RemoveAllViewProps();
+    sagittalRenderer->RemoveAllViewProps();
+    coronalRenderer->RemoveAllViewProps();
+
+    // Viewport layout 2x2:
+    //  [Axial    | Sagittal]
+    //  [Coronal  | 3D View ]
+    axialRenderer->SetViewport   (0.0, 0.5, 0.5, 1.0);
+    sagittalRenderer->SetViewport(0.5, 0.5, 1.0, 1.0);
+    coronalRenderer->SetViewport (0.0, 0.0, 0.5, 0.5);
+    renderer->SetViewport        (0.5, 0.0, 1.0, 0.5);
+
+    axialRenderer->SetBackground   (0, 0, 0);
+    sagittalRenderer->SetBackground(0, 0, 0);
+    coronalRenderer->SetBackground (0, 0, 0);
+    renderer->SetBackground        (0, 0, 0);
+
+    vtkWidget->renderWindow()->AddRenderer(axialRenderer);
+    vtkWidget->renderWindow()->AddRenderer(sagittalRenderer);
+    vtkWidget->renderWindow()->AddRenderer(coronalRenderer);
+
+    // ============================================================
+    // 4. Nhãn tiêu đề
+    // ============================================================
+    auto createTitle = [&](vtkRenderer* ren, const QString &text) {
+        vtkNew<vtkCornerAnnotation> anno;
+        anno->SetText(2, text.toStdString().c_str());
+        anno->GetTextProperty()->SetColor(0, 1, 0);
+        anno->GetTextProperty()->SetFontSize(18);
+        ren->AddViewProp(anno);
+    };
+    createTitle(axialRenderer,    "Axial");
+    createTitle(sagittalRenderer, "Sagittal");
+    createTitle(coronalRenderer,  "Coronal");
+    createTitle(renderer,         "3D View");
+
+    // ============================================================
+    // 5. Đường ngăn cách
+    // ============================================================
+    auto addBorder = [&](vtkRenderer* ren, bool right, bool bottom) {
+        auto makeLine = [&](double x1, double y1, double x2, double y2) {
+            vtkNew<vtkLineSource> line;
+            line->SetPoint1(x1, y1, 0);
+            line->SetPoint2(x2, y2, 0);
+            vtkNew<vtkCoordinate> coord;
+            coord->SetCoordinateSystemToNormalizedViewport();
+            vtkNew<vtkPolyDataMapper2D> m;
+            m->SetInputConnection(line->GetOutputPort());
+            m->SetTransformCoordinate(coord);
+            vtkNew<vtkActor2D> a;
+            a->SetMapper(m);
+            a->GetProperty()->SetColor(1.0, 1.0, 0.0);
+            a->GetProperty()->SetLineWidth(3.0);
+            ren->AddActor(a);
+        };
+        if (right)  makeLine(1.0, 0.0, 1.0, 1.0);
+        if (bottom) makeLine(0.0, 0.0, 1.0, 0.0);
+    };
+    addBorder(axialRenderer,    true,  true);
+    addBorder(sagittalRenderer, false, true);
+    addBorder(coronalRenderer,  true,  false);
+
+    // ============================================================
+    // 6. MPR slices
+    // ============================================================
+    axialRenderer->AddViewProp(DicomLoader::createSlice(volumeData, 2, window, level));
+    sagittalRenderer->AddViewProp(DicomLoader::createSlice(volumeData, 0, window, level));
+    coronalRenderer->AddViewProp (DicomLoader::createSlice(volumeData, 1, window, level));
+
+    // ============================================================
+    // 7. Volume 3D
+    // ============================================================
+    renderer->AddViewProp(DicomLoader::createVolume(volumeData, range));
+
+    // ============================================================
+    // 8. Camera setup
+    // ============================================================
+    double center[3];
+    volumeData->GetCenter(center);
+    double bounds[6];
+    volumeData->GetBounds(bounds);
+    double maxDim = std::max({bounds[1]-bounds[0],
+                              bounds[3]-bounds[2],
+                              bounds[5]-bounds[4]});
+
+    auto setupCam = [&](vtkRenderer* ren,
+                        double nx, double ny, double nz,
+                        double ux, double uy, double uz) {
+        vtkCamera* cam = ren->GetActiveCamera();
+        cam->SetFocalPoint(center[0], center[1], center[2]);
+        double dist = maxDim * 2.0;
+        cam->SetPosition(center[0]+nx*dist, center[1]+ny*dist, center[2]+nz*dist);
+        cam->SetViewUp(ux, uy, uz);
+        cam->ParallelProjectionOn();
+        ren->ResetCamera();
+    };
+
+    setupCam(axialRenderer,     0,  0,  1,  0, -1,  0);  // Z+ (từ trên xuống)
+    setupCam(sagittalRenderer, -1,  0,  0,  0,  0,  1);  // X- (từ trái sang)
+    setupCam(coronalRenderer,   0, -1,  0,  0,  0,  1);  // Y- (từ trước ra)
+
+    {
+        vtkCamera* cam = renderer->GetActiveCamera();
+        cam->SetFocalPoint(center[0], center[1], center[2]);
+        cam->SetPosition(center[0]+maxDim*1.5,
+                         center[1]-maxDim*1.5,
+                         center[2]+maxDim*1.5);
+        cam->SetViewUp(0, 0, 1);
+        cam->ParallelProjectionOff();
+        renderer->ResetCamera();
+    }
+
+    // ============================================================
+    // 9. Render
+    // ============================================================
+    vtkWidget->renderWindow()->Render();
+
+    // Lưu lastUsedPath
+    QString configPath = QApplication::applicationDirPath() + "/config.ini";
+    if (!QFile::exists(configPath))
+        configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+    QSettings settings(configPath, QSettings::IniFormat);
+    settings.setValue("Paths/lastUsedPath", lastUsedPath);
+
+    int* ext = volumeData->GetExtent();
+    QMessageBox::information(this, "DICOM Loaded",
+                             QString("✅ Loaded volume: %1 × %2 × %3 slices\nRange: %4 – %5\nW: %6 / L: %7")
+                                 .arg(ext[1]-ext[0]+1).arg(ext[3]-ext[2]+1).arg(ext[5]-ext[4]+1)
+                                 .arg((int)range[0]).arg((int)range[1])
+                                 .arg((int)window).arg((int)level));
 }
 
 void MainWindow::onHideAIResults() {
@@ -537,13 +751,23 @@ void MainWindow::setupNavigationUI() {
     navWidget->setFixedHeight(40); // Cố định chiều cao thanh điều hướng
     
     btnPrev = new QPushButton("Prev", this);
+    btnAutoPrev = new QPushButton("AutoPrev", this);
+    btnAutoNext = new QPushButton("AutoNext", this);
     btnNext = new QPushButton("Next", this);
     
     btnPrev->setEnabled(false);
+    btnAutoPrev->setEnabled(false);
+    btnAutoNext->setEnabled(false);
     btnNext->setEnabled(false);
     
-    navLayout->addStretch(); // Đẩy nút vào giữa
+    // Styling buttons to indicate state later
+    btnAutoPrev->setCheckable(true);
+    btnAutoNext->setCheckable(true);
+
+    navLayout->addStretch(); 
     navLayout->addWidget(btnPrev);
+    navLayout->addWidget(btnAutoPrev);
+    navLayout->addWidget(btnAutoNext);
     navLayout->addWidget(btnNext);
     navLayout->addStretch();
     
@@ -551,6 +775,8 @@ void MainWindow::setupNavigationUI() {
     
     connect(btnPrev, &QPushButton::clicked, this, &MainWindow::onPrevImage);
     connect(btnNext, &QPushButton::clicked, this, &MainWindow::onNextImage);
+    connect(btnAutoPrev, &QPushButton::clicked, this, &MainWindow::onAutoPrev);
+    connect(btnAutoNext, &QPushButton::clicked, this, &MainWindow::onAutoNext);
 }
 
 void MainWindow::onNextImage() {
@@ -585,9 +811,63 @@ void MainWindow::loadCurrentIndexImage() {
     updateNavigationButtons();
 }
 
+void MainWindow::onAutoNext() {
+    if (autoTimer->isActive() && isAutoNext) {
+        autoTimer->stop();
+        btnAutoNext->setChecked(false);
+    } else {
+        isAutoNext = true;
+        autoTimer->start(500); // 500ms per image
+        btnAutoNext->setChecked(true);
+        btnAutoPrev->setChecked(false);
+    }
+}
+
+void MainWindow::onAutoPrev() {
+    if (autoTimer->isActive() && !isAutoNext) {
+        autoTimer->stop();
+        btnAutoPrev->setChecked(false);
+    } else {
+        isAutoNext = false;
+        autoTimer->start(500);
+        btnAutoPrev->setChecked(true);
+        btnAutoNext->setChecked(false);
+    }
+}
+
+void MainWindow::onAutoTimerTimeout() {
+    if (isAutoNext) {
+        if (currentImageIndex < imageFileList.size() - 1) {
+            onNextImage();
+        } else {
+            autoTimer->stop();
+            btnAutoNext->setChecked(false);
+        }
+    } else {
+        if (currentImageIndex > 0) {
+            onPrevImage();
+        } else {
+            autoTimer->stop();
+            btnAutoPrev->setChecked(false);
+        }
+    }
+}
+
 void MainWindow::updateNavigationButtons() {
+    bool hasImages = !imageFileList.isEmpty();
     btnPrev->setEnabled(currentImageIndex > 0);
     btnNext->setEnabled(currentImageIndex >= 0 && currentImageIndex < imageFileList.size() - 1);
+    btnAutoPrev->setEnabled(hasImages);
+    btnAutoNext->setEnabled(hasImages);
+    
+    if (currentImageIndex <= 0 && !isAutoNext) {
+        autoTimer->stop();
+        btnAutoPrev->setChecked(false);
+    }
+    if (currentImageIndex >= imageFileList.size() - 1 && isAutoNext) {
+        autoTimer->stop();
+        btnAutoNext->setChecked(false);
+    }
 }
 
 void MainWindow::updateMenuStates() {

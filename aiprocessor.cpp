@@ -1,5 +1,6 @@
 #include "aiprocessor.h"
 #include <QDebug>
+#include <QDir>
 #include <algorithm>
 #include <numeric>
 #include <opencv2/imgproc.hpp>
@@ -31,10 +32,20 @@ AIProcessor::AIProcessor() : isDetModelLoaded(false), isSegModelLoaded(false) {
       sessionOptions->AppendExecutionProvider_CUDA(cuda_options);
       qDebug() << "ONNX Runtime: Using CUDA Execution Provider (GPU)";
     } else if (trt_available) {
+      // Tự động tạo thư mục cache nếu chưa có
+      QDir().mkpath("models/cache");
+
       OrtTensorRTProviderOptions trt_options;
       trt_options.device_id = 0;
+      trt_options.trt_max_partition_iterations = 1000;
+      trt_options.trt_min_subgraph_size = 1;
+
+      // Bật cache để tăng tốc khởi động cho những lần sau
+      trt_options.trt_engine_cache_enable = 1;
+      trt_options.trt_engine_cache_path = "models/cache";
+
       sessionOptions->AppendExecutionProvider_TensorRT(trt_options);
-      qDebug() << "ONNX Runtime: Using TensorRT Execution Provider";
+      qDebug() << "ONNX Runtime: Using TensorRT Execution Provider (High Performance)";
     } else {
       qDebug() << "ONNX Runtime: GPU providers not found, using CPU fallback";
     }

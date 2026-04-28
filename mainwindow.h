@@ -44,6 +44,10 @@ private slots:
     void onObjectDetection();
     void onSegmentation();
     void onHideAIResults();
+    void onAutoNext();
+    void onAutoPrev();
+    void onAutoTimerTimeout();
+    void onLoadDicom();
 
 private:
     void loadOBJwithMTL(const QString &objPath, const QString &mtlPath);
@@ -53,7 +57,11 @@ private:
 
     Ui::MainWindow *ui;
     QVTKOpenGLNativeWidget *vtkWidget;
-    vtkSmartPointer<vtkRenderer> renderer;
+    vtkSmartPointer<vtkRenderer> renderer; // 3D/Main
+    vtkSmartPointer<vtkRenderer> axialRenderer;
+    vtkSmartPointer<vtkRenderer> sagittalRenderer;
+    vtkSmartPointer<vtkRenderer> coronalRenderer;
+    vtkSmartPointer<vtkRenderer> uiRenderer; // Renderer cho đường kẻ và nhãn
 
     std::vector<vtkSmartPointer<vtkActor>> modelActors;
     vtkSmartPointer<vtkActor> texturePlaneActor;
@@ -79,6 +87,10 @@ private:
     // Navigation
     QPushButton *btnPrev;
     QPushButton *btnNext;
+    QPushButton *btnAutoPrev;
+    QPushButton *btnAutoNext;
+    QTimer *autoTimer;
+    bool isAutoNext; 
     QStringList imageFileList;
     int currentImageIndex;
 
