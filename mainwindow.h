@@ -9,6 +9,7 @@
 #include <vector>
 #include <QProgressDialog>
 #include <QProgressBar>
+#include "crosshairManager.h"
 
 class ReconstructionPipeline;
 class AIProcessor;
@@ -66,6 +67,9 @@ private:
     std::vector<vtkSmartPointer<vtkActor>> modelActors;
     vtkSmartPointer<vtkActor> texturePlaneActor;
     vtkSmartPointer<vtkActor> cloudActor;
+
+    CrosshairManager*                         m_crosshair = nullptr;
+    vtkSmartPointer<CrosshairInteractorStyle> m_crosshairStyle;
 
     ReconstructionPipeline *reconstruction;
     AIProcessor *aiProcessor;

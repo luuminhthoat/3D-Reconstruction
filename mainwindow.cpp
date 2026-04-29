@@ -6,6 +6,7 @@
 #include "reconstructionpipeline.h"
 #include "ui_mainwindow.h"
 #include "aiprocessor.h"
+#include "crosshairManager.h"
 #include <QApplication>
 #include <QProcess>
 #include <QDebug>
@@ -706,6 +707,36 @@ void MainWindow::onLoadDicom() {
         cam->SetViewUp(0, 0, 1);
         cam->ParallelProjectionOff();
         renderer->ResetCamera();
+    }
+
+    // ── 8b. Khởi tạo Crosshair ─────────────────────────────────────────────
+    if (m_crosshair) {
+        m_crosshair->cleanup();
+        delete m_crosshair;
+        m_crosshair = nullptr;
+    }
+    m_crosshair = new CrosshairManager(this);
+    m_crosshair->initialize(
+        volumeData,
+        sagittalRenderer,
+        coronalRenderer,
+        axialRenderer,
+        vtkWidget->renderWindow(),
+        window, level
+        );
+
+    {
+        vtkRenderWindowInteractor *interactor =
+            vtkWidget->renderWindow()->GetInteractor();
+        if (!interactor) {
+            interactor = vtkRenderWindowInteractor::New();
+            vtkWidget->renderWindow()->SetInteractor(interactor);
+            interactor->Initialize();
+        }
+        m_crosshairStyle =
+            vtkSmartPointer<CrosshairInteractorStyle>::New();
+        m_crosshairStyle->manager = m_crosshair;
+        interactor->SetInteractorStyle(m_crosshairStyle);
     }
 
     // ============================================================

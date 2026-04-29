@@ -69,6 +69,8 @@ qt_add_executable(3D-Reconstruction
     model3dloader.cpp
     dicomloader.h
     dicomloader.cpp
+    crosshairManager.cpp
+    crosshairManager.h
 )
 
 # 6. Thêm include directories cho target
