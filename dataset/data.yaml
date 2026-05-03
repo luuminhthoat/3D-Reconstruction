@@ -1,4 +1,4 @@
-path: C:/Users/ADMIN/Documents/3D-Reconstruction/my_dataset
+path: F:/PROJECTS/QT/3D-Reconstruction/Dataset
 train: train/images
 val: valid/images
 test: test/images

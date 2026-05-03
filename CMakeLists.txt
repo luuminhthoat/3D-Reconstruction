@@ -48,33 +48,41 @@ if(NOT onnxruntime_POPULATED)
   FetchContent_Populate(onnxruntime)
 endif()
 
+# Thiết lập đường dẫn tìm kiếm cho AUTOUIC (vì MainWindow.ui nằm trong Includes/)
+set(CMAKE_AUTOUIC_SEARCH_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/Includes)
+
+
+
 # 5. Khai báo executable
 qt_add_executable(3D-Reconstruction
     WIN32 MACOSX_BUNDLE
-    main.cpp
-    mainwindow.cpp
-    mainwindow.h
-    mainwindow.ui
-    PanStyle.h
-    PanStyle.cpp
-    reconstructionpipeline.h
-    reconstructionpipeline.cpp
-    reconstructthread.h
-    reconstructthread.cpp
-    aiprocessor.h
-    aiprocessor.cpp
-    image2dloader.h
-    image2dloader.cpp
-    model3dloader.h
-    model3dloader.cpp
-    dicomloader.h
-    dicomloader.cpp
-    crosshairManager.cpp
-    crosshairManager.h
+    Source/Main.cpp
+    Source/MainWindow.cpp
+    Includes/MainWindow.h
+    Includes/MainWindow.ui
+    Includes/PanStyle.h
+    Source/PanStyle.cpp
+    Includes/ReconstructionPipeline.h
+    Source/ReconstructionPipeline.cpp
+    Includes/ReconstructThread.h
+    Source/ReconstructThread.cpp
+    Includes/AIProcessor.h
+    Source/AIProcessor.cpp
+    Includes/Image2DLoader.h
+    Source/Image2DLoader.cpp
+    Includes/Model3DLoader.h
+    Source/Model3DLoader.cpp
+    Includes/DicomLoader.h
+    Source/DicomLoader.cpp
+    Source/CrosshairManager.cpp
+    Includes/CrosshairManager.h
 )
+
+
 
 # 6. Thêm include directories cho target
 target_include_directories(3D-Reconstruction PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/Includes
     ${VTK_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
     ${PCL_INCLUDE_DIRS}          # <--- Thêm PCL (đã bao gồm Eigen)
