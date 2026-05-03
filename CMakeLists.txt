@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.19)
 project(3D-Reconstruction LANGUAGES CXX)
 
 # 1. Tìm Qt6
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets OpenGL)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets OpenGL Network)
 qt_standard_project_setup()
 
 # 2. Tìm VTK (tắt Vulkan)
@@ -76,6 +76,8 @@ qt_add_executable(3D-Reconstruction
     Source/DicomLoader.cpp
     Source/CrosshairManager.cpp
     Includes/CrosshairManager.h
+    Source/AIAssistant.cpp
+    Includes/AIAssistant.h
 )
 
 
@@ -102,6 +104,7 @@ target_link_libraries(3D-Reconstruction
         Qt6::Core
         Qt6::Widgets
         Qt6::OpenGL
+        Qt6::Network
         ${VTK_LIBRARIES}
         ${OpenCV_LIBS}
         ${PCL_LIBRARIES}         # <--- Thêm PCL

@@ -6,10 +6,10 @@
 #include "ReconstructionPipeline.h"
 #include "ui_MainWindow.h"
 #include "AIProcessor.h"
+#include "AIAssistant.h"
 #include "CrosshairManager.h"
 #include <QApplication>
 #include <QProcess>
-#include <QDebug>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QDir>
@@ -24,6 +24,9 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
+#include <QScrollBar>
+
+// VTK Includes
 #include <vtkActor.h>
 #include <vtkActorCollection.h>
 #include <vtkCellArray.h>
@@ -49,7 +52,6 @@
 #include "Model3DLoader.h"
 #include "DicomLoader.h"
 #include <vtkCamera.h>
-#include <vtkImageData.h>
 #include <vtkCornerAnnotation.h>
 #include <vtkLineSource.h>
 #include <vtkPolyDataMapper2D.h>
@@ -57,928 +59,228 @@
 #include <vtkProperty2D.h>
 #include <vtkCoordinate.h>
 #include <vtkTextProperty.h>
-#include <vtkLineSource.h>
-#include <vtkLineSource.h>
 #include <vtkDICOMImageReader.h>
 
-// ------------------------------------------------------------------
-// Hàm trợ giúp
-// ------------------------------------------------------------------
-void MainWindow::clear3DModel() {
-  for (auto &actor : modelActors) {
-    renderer->RemoveActor(actor);
-  }
-  modelActors.clear();
-}
-
-void MainWindow::clear2DTexture() {
-  if (texturePlaneActor) {
-    renderer->RemoveActor(texturePlaneActor);
-    texturePlaneActor = nullptr;
-  }
-}
-
-void MainWindow::clearPointCloud() {
-  if (cloudActor) {
-    renderer->RemoveActor(cloudActor);
-    cloudActor = nullptr;
-    pointCloudVisible = false;
-  }
-}
-
+void MainWindow::clear3DModel() { for (auto &actor : modelActors) { renderer->RemoveActor(actor); } modelActors.clear(); }
+void MainWindow::clear2DTexture() { if (texturePlaneActor) { renderer->RemoveActor(texturePlaneActor); texturePlaneActor = nullptr; } }
+void MainWindow::clearPointCloud() { if (cloudActor) { renderer->RemoveActor(cloudActor); cloudActor = nullptr; pointCloudVisible = false; } }
 void MainWindow::loadOBJwithMTL(const QString &objPath, const QString &mtlPath) {
-    clear3DModel();
-    modelActors = Model3DLoader::load(objPath, mtlPath);
-    for (auto &actor : modelActors) {
-        renderer->AddActor(actor);
-    }
-    renderer->ResetCamera();
-    vtkWidget->renderWindow()->Render();
+    clear3DModel(); 
+    auto actors = Model3DLoader::load(objPath, mtlPath);
+    for (auto &a : actors) { modelActors.push_back(a); renderer->AddActor(a); }
+    renderer->ResetCamera(); vtkWidget->renderWindow()->Render();
+}
+void MainWindow::resetToSingleRenderer() {
+    if (m_crosshair) { m_crosshair->cleanup(); delete m_crosshair; m_crosshair = nullptr; }
+    m_crosshairStyle = nullptr; auto *rw = vtkWidget->renderWindow();
+    if (axialRenderer) { axialRenderer->RemoveAllViewProps(); rw->RemoveRenderer(axialRenderer); axialRenderer = nullptr; }
+    if (sagittalRenderer) { sagittalRenderer->RemoveAllViewProps(); rw->RemoveRenderer(sagittalRenderer); sagittalRenderer = nullptr; }
+    if (coronalRenderer) { coronalRenderer->RemoveAllViewProps(); rw->RemoveRenderer(coronalRenderer); coronalRenderer = nullptr; }
+    renderer->SetViewport(0.0, 0.0, 1.0, 1.0); renderer->RemoveAllViewProps();
+    vtkNew<PanStyle> style; if (rw->GetInteractor()) rw->GetInteractor()->SetInteractorStyle(style);
+    renderer->SetBackground(0, 0, 0); rw->Render();
 }
 
-// ------------------------------------------------------------------
-// resetToSingleRenderer
-//   Dismantles the 2x2 DICOM viewport layout and restores the main
-//   renderer to occupy the full render window. Call before loading
-//   non-DICOM content (2D image, 3D model, point cloud).
-// ------------------------------------------------------------------
-void MainWindow::resetToSingleRenderer()
-{
-    // Cleanup crosshair state & actors
-    if (m_crosshair) {
-        m_crosshair->cleanup();
-        delete m_crosshair;
-        m_crosshair = nullptr;
-    }
-    m_crosshairStyle = nullptr;
-
-    auto *rw = vtkWidget->renderWindow();
-
-    // Remove MPR renderers from the window
-    if (axialRenderer) {
-        axialRenderer->RemoveAllViewProps();
-        rw->RemoveRenderer(axialRenderer);
-        axialRenderer = nullptr;
-    }
-    if (sagittalRenderer) {
-        sagittalRenderer->RemoveAllViewProps();
-        rw->RemoveRenderer(sagittalRenderer);
-        sagittalRenderer = nullptr;
-    }
-    if (coronalRenderer) {
-        coronalRenderer->RemoveAllViewProps();
-        rw->RemoveRenderer(coronalRenderer);
-        coronalRenderer = nullptr;
-    }
-
-    // Restore main renderer to full screen
-    renderer->SetViewport(0.0, 0.0, 1.0, 1.0);
-    renderer->RemoveAllViewProps();
-
-    // Restore default interactor style (pan/zoom for 3D view)
-    vtkNew<PanStyle> style;
-    auto *interactor = rw->GetInteractor();
-    if (interactor) interactor->SetInteractorStyle(style);
-
-    renderer->SetBackground(0.1, 0.2, 0.4);
-    rw->Render();
-}
-
-// ------------------------------------------------------------------
-// Constructor & Destructor
-// ------------------------------------------------------------------
-MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent), ui(new Ui::MainWindow), pointCloudVisible(false),
-      texturePlaneActor(nullptr), currentImageIndex(-1), currentAIMode(AIMode::None),
-      isAutoNext(true) {
-  ui->setupUi(this);
-
-  autoTimer = new QTimer(this);
-  connect(autoTimer, &QTimer::timeout, this, &MainWindow::onAutoTimerTimeout);
-
-  // Layout setup for central widget
-  QWidget *central = new QWidget(this);
-  setCentralWidget(central);
-  QVBoxLayout *mainLayout = new QVBoxLayout(central);
+MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWindow), pointCloudVisible(false), texturePlaneActor(nullptr), currentImageIndex(-1), currentAIMode(AIMode::None), isAutoNext(true) {
+  ui->setupUi(this); autoTimer = new QTimer(this); connect(autoTimer, &QTimer::timeout, this, &MainWindow::onAutoTimerTimeout);
   
-  vtkWidget = new QVTKOpenGLNativeWidget(this);
-  mainLayout->addWidget(vtkWidget);
+  aiAssistant = new AIAssistant(this);
+  connect(aiAssistant, &AIAssistant::historyChanged, this, &MainWindow::updateChatUI);
+  connect(aiAssistant, &AIAssistant::serverStatusChanged, this, &MainWindow::onAssistantStatusChanged);
+  connect(aiAssistant, &AIAssistant::errorOccurred, this, &MainWindow::onAssistantError);
 
+  QWidget *central = new QWidget(this); setCentralWidget(central); QVBoxLayout *mainLayout = new QVBoxLayout(central);
+  vtkWidget = new QVTKOpenGLNativeWidget(this); mainLayout->addWidget(vtkWidget);
   setupNavigationUI();
-
-  // Sử dụng thư mục chứa file thực thi để tìm config.ini
-  QString configPath = QApplication::applicationDirPath() + "/config.ini";
-  if (!QFile::exists(configPath)) {
-      configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
-  }
-  
-  QSettings settings(configPath, QSettings::IniFormat);
-  lastUsedPath = settings.value("Paths/lastUsedPath", "").toString();
-
-  renderer = vtkSmartPointer<vtkRenderer>::New();
-  renderer->SetBackground(0.1, 0.2, 0.4);
-  vtkWidget->renderWindow()->AddRenderer(renderer);
-
-  // Thêm đèn chiếu sáng
-  vtkSmartPointer<vtkLight> headlight = vtkSmartPointer<vtkLight>::New();
-  headlight->SetLightTypeToHeadlight();
-  headlight->SetIntensity(1.5);
-  renderer->AddLight(headlight);
-
-  vtkSmartPointer<vtkLight> light1 = vtkSmartPointer<vtkLight>::New();
-  light1->SetLightTypeToSceneLight();
-  light1->SetPosition(2.0, 3.0, 4.0);
-  light1->SetIntensity(1.0);
-  renderer->AddLight(light1);
-
-  vtkSmartPointer<vtkLight> light2 = vtkSmartPointer<vtkLight>::New();
-  light2->SetLightTypeToSceneLight();
-  light2->SetPosition(-2.0, 1.0, 3.0);
-  light2->SetIntensity(0.8);
-  renderer->AddLight(light2);
-
-  progressDialog = new QProgressDialog(this);
-  progressBar = new QProgressBar(progressDialog);
-  progressBar->setFixedHeight(50);
-  progressBar->setMinimumWidth(400);
-  progressDialog->setBar(progressBar);
-  progressDialog->setCancelButton(nullptr);
-  progressDialog->setMinimumDuration(0);
-  progressDialog->setWindowModality(Qt::WindowModal);
-  progressDialog->setRange(0, 100);
-  progressDialog->reset();
-  progressDialog->setMinimumSize(500, 200);
-
-  // Toolbar
+  QString configPath = QApplication::applicationDirPath() + "/config.ini"; if (!QFile::exists(configPath)) configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
+  QSettings settings(configPath, QSettings::IniFormat); lastUsedPath = settings.value("Paths/lastUsedPath", "").toString();
+  renderer = vtkSmartPointer<vtkRenderer>::New(); renderer->SetBackground(0, 0, 0); vtkWidget->renderWindow()->AddRenderer(renderer);
+  vtkSmartPointer<vtkLight> headlight = vtkSmartPointer<vtkLight>::New(); headlight->SetLightTypeToHeadlight(); headlight->SetIntensity(1.5); renderer->AddLight(headlight);
+  progressDialog = new QProgressDialog(this); progressBar = new QProgressBar(progressDialog); progressBar->setFixedHeight(50); progressBar->setMinimumWidth(400); progressDialog->setBar(progressBar); progressDialog->setCancelButton(nullptr); progressDialog->setRange(0, 100); progressDialog->reset(); progressDialog->setMinimumSize(500, 200);
   QToolBar *toolBar = addToolBar("Reconstruction 3d");
-  
-  // Phase 1 Group
-  QToolButton *btnPhase1 = new QToolButton(this);
-  btnPhase1->setText("Phase 1: Viewer");
-  btnPhase1->setPopupMode(QToolButton::InstantPopup);
-  QMenu *menuPhase1 = new QMenu(btnPhase1);
-  menuPhase1->addAction("Load 2D images", this, &MainWindow::onLoad2DImages);
-  menuPhase1->addAction("Load 3D images", this, &MainWindow::onLoad3DImages);
-  menuPhase1->addAction("Load 2D DICOM", this, &MainWindow::onLoadDicom);
-  btnPhase1->setMenu(menuPhase1);
-  toolBar->addWidget(btnPhase1);
-
+  QToolButton *btnP1 = new QToolButton(this); btnP1->setText("Phase 1: Viewer"); btnP1->setPopupMode(QToolButton::InstantPopup);
+  QMenu *m1 = new QMenu(btnP1); m1->addAction("Load 2D images", this, &MainWindow::onLoad2DImages); m1->addAction("Load 3D images", this, &MainWindow::onLoad3DImages); m1->addAction("Load 2D DICOM", this, &MainWindow::onLoadDicom); btnP1->setMenu(m1); toolBar->addWidget(btnP1);
   toolBar->addSeparator();
-
-  // Phase 2 Group
-  QToolButton *btnPhase2 = new QToolButton(this);
-  btnPhase2->setText("Phase 2: Reconstruction");
-  btnPhase2->setPopupMode(QToolButton::InstantPopup);
-  QMenu *menuPhase2 = new QMenu(btnPhase2);
-  menuPhase2->addAction("Load multiple 2D images", this, &MainWindow::onLoadMultiple2DImages);
-  menuPhase2->addAction("Run Reconstruction", this, &MainWindow::onRunReconstruction);
-  
-  QMenu *menuCloud = menuPhase2->addMenu("Point Cloud");
-  actShowCloud = menuCloud->addAction("Show Point Cloud", this, &MainWindow::onShowPointCloud);
-  actHideCloud = menuCloud->addAction("Hide Point Cloud", this, &MainWindow::onHidePointCloud);
-  actHideCloud->setEnabled(false);
-
-  btnPhase2->setMenu(menuPhase2);
-  toolBar->addWidget(btnPhase2);
-
+  QToolButton *btnP2 = new QToolButton(this); btnP2->setText("Phase 2: Reconstruction"); btnP2->setPopupMode(QToolButton::InstantPopup);
+  QMenu *m2 = new QMenu(btnP2); m2->addAction("Load multiple 2D images", this, &MainWindow::onLoadMultiple2DImages); m2->addAction("Run Reconstruction", this, &MainWindow::onRunReconstruction);
+  QMenu *mc = m2->addMenu("Point Cloud"); actShowCloud = mc->addAction("Show Point Cloud", this, &MainWindow::onShowPointCloud); actHideCloud = mc->addAction("Hide Point Cloud", this, &MainWindow::onHidePointCloud); actHideCloud->setEnabled(false); btnP2->setMenu(m2); toolBar->addWidget(btnP2);
   toolBar->addSeparator();
-
-  // Phase 4 Group
-  QToolButton *btnPhase4 = new QToolButton(this);
-  btnPhase4->setText("Phase 4: AI Processing");
-  btnPhase4->setPopupMode(QToolButton::InstantPopup);
-  QMenu *menuPhase4 = new QMenu(btnPhase4);
-  menuPhase4->addAction("Train AI Model", this, &MainWindow::onTrainModel);
-  
-  QMenu *menuDet = menuPhase4->addMenu("Object Detection");
-  actRunDet = menuDet->addAction("Run Detection", this, &MainWindow::onObjectDetection);
-  actHideDet = menuDet->addAction("Hide Detection", this, &MainWindow::onHideAIResults);
-  actHideDet->setEnabled(false);
-
-  QMenu *menuSeg = menuPhase4->addMenu("Segmentation");
-  actRunSeg = menuSeg->addAction("Run Segmentation", this, &MainWindow::onSegmentation);
-  actHideSeg = menuSeg->addAction("Hide Segmentation", this, &MainWindow::onHideAIResults);
-  actHideSeg->setEnabled(false);
-
-  btnPhase4->setMenu(menuPhase4);
-  toolBar->addWidget(btnPhase4);
-
-  reconstruction = new ReconstructionPipeline();
-  aiProcessor = new AIProcessor();
-  
-  QString modelsPath = QFileInfo(__FILE__).absolutePath() + "/../AITraining/Models";
-  aiProcessor->loadDetectionModel(modelsPath + "/yolo11n.onnx");
-  aiProcessor->loadSegmentationModel(modelsPath + "/yolo11n-seg.onnx");
-
-  QString objPath = "C:/Users/ADMIN/Documents/3D-Reconstruction/3DModels/85-cottage_obj/cube.obj";
-  QString mtlPath = "C:/Users/ADMIN/Documents/3D-Reconstruction/3DModels/85-cottage_obj/cube.mtl";
-  if (QFileInfo::exists(objPath)) {
-    loadOBJwithMTL(objPath, mtlPath);
-  }
-
-    vtkRenderWindowInteractor *interactor = vtkWidget->renderWindow()->GetInteractor();
-    if (!interactor) {
-        interactor = vtkRenderWindowInteractor::New();
-        vtkWidget->renderWindow()->SetInteractor(interactor);
-    }
-    
-    vtkNew<PanStyle> style;
-    interactor->SetInteractorStyle(style);
-    interactor->Initialize();
-
-    renderer->ResetCamera();
+  QToolButton *btnP4 = new QToolButton(this); btnP4->setText("Phase 4: AI Processing"); btnP4->setPopupMode(QToolButton::InstantPopup);
+  QMenu *m4 = new QMenu(btnP4); m4->addAction("Train AI Model", this, &MainWindow::onTrainModel);
+  QMenu *md = m4->addMenu("Object Detection"); actRunDet = md->addAction("Run Detection", this, &MainWindow::onObjectDetection); actHideDet = md->addAction("Hide Detection", this, &MainWindow::onHideAIResults); actHideDet->setEnabled(false);
+  QMenu *ms = m4->addMenu("Segmentation"); actRunSeg = ms->addAction("Run Segmentation", this, &MainWindow::onSegmentation); actHideSeg = ms->addAction("Hide Segmentation", this, &MainWindow::onHideAIResults); actHideSeg->setEnabled(false); btnP4->setMenu(m4); toolBar->addWidget(btnP4);
+  toolBar->addSeparator(); QAction *actChat = toolBar->addAction("AI Assistant"); connect(actChat, &QAction::triggered, this, &MainWindow::onToggleChatbot);
+  setupChatbotUI(); reconstruction = new ReconstructionPipeline(); aiProcessor = new AIProcessor();
+  QString modelsPath = QFileInfo(__FILE__).absolutePath() + "/../AITraining/Models"; aiProcessor->loadDetectionModel(modelsPath + "/yolo11n.onnx"); aiProcessor->loadSegmentationModel(modelsPath + "/yolo11n-seg.onnx");
+  vtkRenderWindowInteractor *it = vtkWidget->renderWindow()->GetInteractor(); if (!it) { it = vtkRenderWindowInteractor::New(); vtkWidget->renderWindow()->SetInteractor(it); }
+  vtkNew<PanStyle> style; it->SetInteractorStyle(style); it->Initialize(); renderer->ResetCamera();
+  updateChatUI();
 }
 
-MainWindow::~MainWindow() {
-  delete reconstruction;
-  delete aiProcessor;
-  delete ui;
-  // delete progressDialog;
-}
+MainWindow::~MainWindow() { delete reconstruction; delete aiProcessor; delete ui; }
 
-// ------------------------------------------------------------------
-// Slots
-// ------------------------------------------------------------------
 void MainWindow::onLoad2DImages() {
-  QString startDir = lastUsedPath.isEmpty() ? "" : lastUsedPath;
-  QString fileName = QFileDialog::getOpenFileName(
-      this, "Select 2D Image", startDir, "Images (*.png *.jpg *.jpeg *.bmp)");
-  if (fileName.isEmpty())
-    return;
-  lastUsedPath = QFileInfo(fileName).absolutePath();
-  current2DImagePath = fileName;
-  QString configPath = QApplication::applicationDirPath() + "/config.ini";
-  if (!QFile::exists(configPath)) configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
-  
-  QSettings settings(configPath, QSettings::IniFormat);
-  settings.setValue("Paths/lastUsedPath", lastUsedPath);
-
-  // Restore single-renderer layout if DICOM was previously loaded
-  resetToSingleRenderer();
-
-  clear3DModel();
-  clearPointCloud();
-  clear2DTexture();
-
-  currentAIMode = AIMode::None;
-  updateMenuStates();
-
+  QString fileName = QFileDialog::getOpenFileName(this, "Select 2D Image", lastUsedPath, "Images (*.png *.jpg *.jpeg *.bmp)"); if (fileName.isEmpty()) return;
+  lastUsedPath = QFileInfo(fileName).absolutePath(); current2DImagePath = fileName;
+  QSettings(QApplication::applicationDirPath() + "/config.ini", QSettings::IniFormat).setValue("Paths/lastUsedPath", lastUsedPath);
+  resetToSingleRenderer(); clear3DModel(); clearPointCloud(); clear2DTexture(); currentAIMode = AIMode::None; updateMenuStates();
   texturePlaneActor = Image2DLoader::load(fileName);
   if (texturePlaneActor) {
-      renderer->AddActor(texturePlaneActor);
-      renderer->ResetCamera();
-      vtkWidget->renderWindow()->Render();
-      
-      // Update image list for navigation
-      QFileInfo fileInfo(fileName);
-      QDir dir = fileInfo.dir();
-      QStringList filters;
-      filters << "*.png" << "*.jpg" << "*.jpeg" << "*.bmp";
-      imageFileList = dir.entryList(filters, QDir::Files, QDir::Name);
-      currentImageIndex = imageFileList.indexOf(fileInfo.fileName());
-      
-      updateNavigationButtons();
+      renderer->AddActor(texturePlaneActor); renderer->ResetCamera(); vtkWidget->renderWindow()->Render();
+      QFileInfo fi(fileName); imageFileList = fi.dir().entryList(QStringList() << "*.png" << "*.jpg" << "*.jpeg" << "*.bmp", QDir::Files, QDir::Name);
+      currentImageIndex = imageFileList.indexOf(fi.fileName()); updateNavigationButtons();
   }
 }
-
 void MainWindow::onLoad3DImages() {
-  QString startDir = lastUsedPath.isEmpty() ? "" : lastUsedPath;
-  QString objFileName = QFileDialog::getOpenFileName(
-      this, "Select OBJ file", startDir, "OBJ Files (*.obj)");
-  if (objFileName.isEmpty())
-    return;
-
-  QFileInfo objInfo(objFileName);
-  QString mtlFileName = objInfo.path() + "/" + objInfo.completeBaseName() + ".mtl";
-
-  lastUsedPath = objInfo.absolutePath();
-  QString configPath = QApplication::applicationDirPath() + "/config.ini";
-  if (!QFile::exists(configPath)) configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
-  
-  QSettings settings(configPath, QSettings::IniFormat);
-  settings.setValue("Paths/lastUsedPath", lastUsedPath);
-
-  clear3DModel();
-  clearPointCloud();
-  clear2DTexture();
-
-  // Restore single-renderer layout if DICOM was previously loaded
-  resetToSingleRenderer();
-
-  loadOBJwithMTL(objFileName, mtlFileName);
+  QString obj = QFileDialog::getOpenFileName(this, "Select OBJ file", lastUsedPath, "OBJ Files (*.obj)"); if (obj.isEmpty()) return;
+  QFileInfo fi(obj); lastUsedPath = fi.absolutePath(); clear3DModel(); clearPointCloud(); clear2DTexture(); resetToSingleRenderer();
+  loadOBJwithMTL(obj, fi.path() + "/" + fi.completeBaseName() + ".mtl");
 }
-
 void MainWindow::onLoadMultiple2DImages() {
   QString startDir = lastUsedPath.isEmpty() ? "" : lastUsedPath;
-  QStringList files = QFileDialog::getOpenFileNames(
-      this, "Select Images", startDir, "Images (*.png *.jpg *.bmp)");
-  if (files.isEmpty())
-    return;
+  QStringList files = QFileDialog::getOpenFileNames(this, "Select Images", startDir, "Images (*.png *.jpg *.bmp)"); if (files.isEmpty()) return;
   lastUsedPath = QFileInfo(files.first()).absolutePath();
-  QString configPath = QApplication::applicationDirPath() + "/config.ini";
-  if (!QFile::exists(configPath)) configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
-  
-  QSettings settings(configPath, QSettings::IniFormat);
-  settings.setValue("Paths/lastUsedPath", lastUsedPath);
-
+  QSettings(QApplication::applicationDirPath() + "/config.ini", QSettings::IniFormat).setValue("Paths/lastUsedPath", lastUsedPath);
   files.sort();
-
-  std::vector<QString> paths;
-  for (const auto &f : files)
-    paths.push_back(f);
-  reconstruction->setImages(paths);
-
-  QFileInfo firstFile(files.first());
-  QString folder = firstFile.absolutePath();
-  QString baseName = firstFile.completeBaseName();
-
-  QString prefix = baseName;
-  int i = prefix.length() - 1;
-  while (i >= 0 && prefix[i].isDigit())
-    --i;
-  if (i >= 0)
-    prefix = prefix.left(i + 1);
-  else
-    prefix.clear();
-
-  QStringList possibleNames;
-  if (!prefix.isEmpty()) {
-    possibleNames << prefix + "_par.txt";
-    possibleNames << prefix.toLower() + "_par.txt";
+  std::vector<QString> paths; for (const auto &f : files) paths.push_back(f); reconstruction->setImages(paths);
+  QFileInfo firstFile(files.first()); QString folder = firstFile.absolutePath(); QString baseName = firstFile.completeBaseName();
+  QString prefix = baseName; int i = prefix.length() - 1; while (i >= 0 && prefix[i].isDigit()) --i;
+  if (i >= 0) prefix = prefix.left(i + 1); else prefix.clear();
+  QStringList possibleNames; if (!prefix.isEmpty()) { possibleNames << prefix + "_par.txt" << prefix.toLower() + "_par.txt"; }
+  possibleNames << "temple_par.txt" << "templeR_par.txt" << "dino_par.txt" << "dinoR_par.txt" << "par.txt" << "camera_params.txt";
+  QString loadedParamsPath = ""; for (const QString &name : possibleNames) {
+    QString fullPath = folder + "/" + name; if (QFile::exists(fullPath)) { if (reconstruction->loadCameraParams(fullPath)) { loadedParamsPath = fullPath; break; } }
   }
-  possibleNames << "temple_par.txt" << "templeR_par.txt"
-                << "dino_par.txt" << "dinoR_par.txt"
-                << "par.txt" << "camera_params.txt";
-
-  bool paramsLoaded = false;
-  QString loadedParamsPath;
-  for (const auto &name : possibleNames) {
-    QString paramsPath = folder + "/" + name;
-    if (QFileInfo::exists(paramsPath)) {
-      paramsLoaded = reconstruction->loadCameraParams(paramsPath);
-      if (paramsLoaded) {
-        loadedParamsPath = paramsPath;
-        break;
-      }
-    }
-  }
-
-  QString msg = QString("Đã tải %1 ảnh.").arg(paths.size());
-  if (paramsLoaded) {
-    msg += QString("\n\n✅ Camera params: %1")
-               .arg(QFileInfo(loadedParamsPath).fileName());
-    msg += "\n→ Sẽ dùng ground-truth projection matrices.";
-  } else {
-    msg += "\n\n⚠️ Không tìm thấy file params phù hợp trong:\n" + folder;
-    msg += "\n→ Cần file có dạng: " +
-           (prefix.isEmpty() ? "templeSR_par.txt" : prefix + "_par.txt");
-    msg += "\n→ Sẽ dùng estimated pose (kém chính xác hơn).";
-  }
-
+  QString msg = QString("Đã tải %1 ảnh.").arg(files.size());
+  if (!loadedParamsPath.isEmpty()) { msg += QString("\n\n✅ Camera params: %1").arg(QFileInfo(loadedParamsPath).fileName()); msg += "\n→ Sẽ dùng ground-truth projection matrices."; }
+  else { msg += "\n\n⚠️ Không tìm thấy file params phù hợp trong:\n" + folder; msg += "\n→ Sẽ dùng estimated pose (kém chính xác hơn)."; }
   QMessageBox::information(this, "Load Images", msg);
 }
-
 void MainWindow::onRunReconstruction() {
-  progressDialog->setLabelText("Đang tái tạo 3D...");
-  progressDialog->setRange(0, 0);
-  progressDialog->setMinimumSize(500, 200);
-  progressDialog->show();
-  QApplication::processEvents();
-
+  progressDialog->setLabelText("Đang tái tạo 3D..."); progressDialog->setRange(0, 0); progressDialog->setMinimumSize(500, 200); progressDialog->show(); QApplication::processEvents();
   ReconstructThread *thread = new ReconstructThread(reconstruction, this);
-
-  // Dùng QMetaObject::invokeMethod để đảm bảo chạy trên main thread
-  connect(
-      thread, &QThread::finished, this,
-      [thread, this]() {
-        progressDialog->hide();
-        bool success = thread->isSuccess();
-        int pointCount = (int)reconstruction->getPointCloud().size();
-        thread->deleteLater();
-
-        if (!success) {
-          QMessageBox::warning(
-              this, "Lỗi",
-              "Reconstruction thất bại!\n"
-              "Kiểm tra:\n"
-              "  • Đã load ít nhất 2 ảnh chưa?\n"
-              "  • File camera params có cùng thư mục ảnh không?");
-        } else {
-          onShowPointCloud();
-          QMessageBox::information(
-              this, "Thành công",
-              QString("Reconstruction hoàn tất!\nTổng số điểm 3D: %1")
-                  .arg(pointCount));
-        }
-      },
-      Qt::QueuedConnection); // ← Thêm Qt::QueuedConnection
-
+  connect(thread, &QThread::finished, this, [thread, this]() {
+        progressDialog->hide(); bool success = thread->isSuccess(); int pointCount = (int)reconstruction->getPointCloud().size(); thread->deleteLater();
+        if (!success || pointCount == 0) QMessageBox::warning(this, "Lỗi", "Reconstruction thất bại!\nKiểm tra lại dữ liệu nạp.");
+        else { onShowPointCloud(); QMessageBox::information(this, "Thành công", QString("Reconstruction hoàn tất!\nTổng số điểm 3D: %1").arg(pointCount)); }
+      }, Qt::QueuedConnection);
   thread->start();
 }
-
 void MainWindow::onShowPointCloud() {
-  auto pts = reconstruction->getPointCloud();
-  auto colors = reconstruction->getPointColors();
-  if (pts.empty()) {
-    QMessageBox::warning(
-        this, "Warning",
-        "Chưa có point cloud nào. Hãy chạy Reconstruction trước.");
-    return;
-  }
-
-  clear3DModel();
-  clearPointCloud();
-
-  // Restore single-renderer layout if DICOM was previously loaded
-  resetToSingleRenderer();
-
-  vtkNew<vtkPoints> vtkPoints;
-  vtkNew<vtkCellArray> vertices;
-  vtkNew<vtkUnsignedCharArray> vtkColors;
-  vtkColors->SetNumberOfComponents(3);
-  vtkColors->SetName("Colors");
-
-  for (size_t i = 0; i < pts.size(); ++i) {
-    vtkPoints->InsertNextPoint(pts[i].x, pts[i].y, pts[i].z);
-    vertices->InsertNextCell(1);
-    vertices->InsertCellPoint(i);
-    if (i < colors.size()) {
-      vtkColors->InsertNextTuple3(colors[i][2], colors[i][1], colors[i][0]);
-    } else {
-      vtkColors->InsertNextTuple3(255, 255, 255);
-    }
-  }
-
-  vtkNew<vtkPolyData> polyData;
-  polyData->SetPoints(vtkPoints);
-  polyData->SetVerts(vertices);
-  polyData->GetPointData()->SetScalars(vtkColors);
-
-  vtkNew<vtkVertexGlyphFilter> glyphFilter;
-  glyphFilter->SetInputData(polyData);
-  glyphFilter->Update();
-
-  vtkNew<vtkPolyDataMapper> cloudMapper;
-  cloudMapper->SetInputConnection(glyphFilter->GetOutputPort());
-
-  cloudActor = vtkSmartPointer<vtkActor>::New();
-  cloudActor->SetMapper(cloudMapper);
-  cloudActor->GetProperty()->SetPointSize(3);
-
-  renderer->AddActor(cloudActor);
-  renderer->ResetCamera();
-  vtkWidget->renderWindow()->Render();
-  pointCloudVisible = true;
-  updateMenuStates();
+  auto pts = reconstruction->getPointCloud(); auto colors = reconstruction->getPointColors(); if (pts.empty()) return;
+  clear3DModel(); clearPointCloud(); resetToSingleRenderer();
+  vtkNew<vtkPoints> vP; vtkNew<vtkCellArray> vV; vtkNew<vtkUnsignedCharArray> vC; vC->SetNumberOfComponents(3);
+  for (size_t i = 0; i < pts.size(); ++i) { vP->InsertNextPoint(pts[i].x, pts[i].y, pts[i].z); vV->InsertNextCell(1); vV->InsertCellPoint(i); if (i < colors.size()) vC->InsertNextTuple3(colors[i][2], colors[i][1], colors[i][0]); else vC->InsertNextTuple3(255, 255, 255); }
+  vtkNew<vtkPolyData> pd; pd->SetPoints(vP); pd->SetVerts(vV); pd->GetPointData()->SetScalars(vC);
+  vtkNew<vtkVertexGlyphFilter> gf; gf->SetInputData(pd); vtkNew<vtkPolyDataMapper> m; m->SetInputConnection(gf->GetOutputPort());
+  cloudActor = vtkSmartPointer<vtkActor>::New(); cloudActor->SetMapper(m); cloudActor->GetProperty()->SetPointSize(3);
+  renderer->AddActor(cloudActor); renderer->ResetCamera(); vtkWidget->renderWindow()->Render(); pointCloudVisible = true; updateMenuStates();
 }
-
-void MainWindow::onHidePointCloud() {
-    clearPointCloud();
-    updateMenuStates();
-    vtkWidget->renderWindow()->Render();
-}
-
-// ------------------------------------------------------------------
-// AI Phase 4 Slots
-// ------------------------------------------------------------------
-void MainWindow::onTrainModel() {
-  QString scriptPath = QFileInfo(__FILE__).absolutePath() + "/../AITraining/TrainModel.py";
-  if (!QFileInfo::exists(scriptPath)) {
-    QMessageBox::warning(this, "Error", "Training script not found:\n" + scriptPath);
-    return;
-  }
-  QProcess::startDetached("cmd.exe", QStringList() << "/c" << "start" << "cmd.exe" << "/k" << "python" << scriptPath);
-}
-
+void MainWindow::onHidePointCloud() { clearPointCloud(); updateMenuStates(); vtkWidget->renderWindow()->Render(); }
+void MainWindow::onTrainModel() { QProcess::startDetached("cmd.exe", QStringList() << "/c" << "start" << "cmd.exe" << "/k" << "python" << QFileInfo(__FILE__).absolutePath() + "/../AITraining/TrainModel.py"); }
 void MainWindow::onObjectDetection() {
-  if (current2DImagePath.isEmpty()) return;
-  if (!aiProcessor->isDetectionModelLoaded()) return;
-
-  cv::Mat inputImage = cv::imread(current2DImagePath.toStdString());
-  cv::Mat resultImage = aiProcessor->runObjectDetection(inputImage);
-  
-  QString tempPath = QApplication::applicationDirPath() + "/temp_ai_result.png";
-  cv::imwrite(tempPath.toStdString(), resultImage);
-  
-  clear2DTexture();
-  texturePlaneActor = Image2DLoader::load(tempPath);
-  if (texturePlaneActor) {
-      renderer->AddActor(texturePlaneActor);
-      renderer->ResetCamera();
-      vtkWidget->renderWindow()->Render();
-  }
-  currentAIMode = AIMode::Detection;
-  updateMenuStates();
+  if (current2DImagePath.isEmpty() || !aiProcessor->isDetectionModelLoaded()) return;
+  cv::Mat res = aiProcessor->runObjectDetection(cv::imread(current2DImagePath.toStdString()));
+  QString tp = QApplication::applicationDirPath() + "/temp_ai_result.png"; cv::imwrite(tp.toStdString(), res);
+  clear2DTexture(); texturePlaneActor = Image2DLoader::load(tp); if (texturePlaneActor) { renderer->AddActor(texturePlaneActor); vtkWidget->renderWindow()->Render(); }
+  currentAIMode = AIMode::Detection; updateMenuStates();
 }
-
 void MainWindow::onSegmentation() {
-  if (current2DImagePath.isEmpty()) return;
-  if (!aiProcessor->isSegmentationModelLoaded()) return;
-
-  cv::Mat inputImage = cv::imread(current2DImagePath.toStdString());
-  cv::Mat resultImage = aiProcessor->runSegmentation(inputImage);
-  
-  QString tempPath = QApplication::applicationDirPath() + "/temp_ai_result.png";
-  cv::imwrite(tempPath.toStdString(), resultImage);
-  
-  clear2DTexture();
-  texturePlaneActor = Image2DLoader::load(tempPath);
-  if (texturePlaneActor) {
-      renderer->AddActor(texturePlaneActor);
-      renderer->ResetCamera();
-      vtkWidget->renderWindow()->Render();
-  }
-  currentAIMode = AIMode::Segmentation;
-    updateMenuStates();
+  if (current2DImagePath.isEmpty() || !aiProcessor->isSegmentationModelLoaded()) return;
+  cv::Mat res = aiProcessor->runSegmentation(cv::imread(current2DImagePath.toStdString()));
+  QString tp = QApplication::applicationDirPath() + "/temp_ai_result.png"; cv::imwrite(tp.toStdString(), res);
+  clear2DTexture(); texturePlaneActor = Image2DLoader::load(tp); if (texturePlaneActor) { renderer->AddActor(texturePlaneActor); vtkWidget->renderWindow()->Render(); }
+  currentAIMode = AIMode::Segmentation; updateMenuStates();
 }
-
-// ================================================================
-// THAY THẾ TOÀN BỘ HÀM onLoadDicom() trong mainwindow.cpp
-//
-// Thêm vào phần #include ở đầu mainwindow.cpp:
-//   #include <algorithm>          // std::max
-//   #include <vtkImageData.h>     // nếu chưa có
-// ================================================================
-
-void MainWindow::onLoadDicom() {
-    QString fileName = QFileDialog::getOpenFileName(
-        this, "Select a DICOM file", lastUsedPath, "DICOM (*.dcm *.dicom)");
-    if (fileName.isEmpty()) return;
-
-    QFileInfo fileInfo(fileName);
-    QString dirPath = fileInfo.absolutePath();
-    lastUsedPath = dirPath;
-    qDebug() << "DICOM Load triggered for path:" << dirPath;
-
-    // ============================================================
-    // 1. Nạp series - trả về vtkImageData (đã ghép đủ slices)
-    // ============================================================
-    auto volumeData = DicomLoader::loadSeries(dirPath);
-    if (!volumeData || volumeData->GetNumberOfPoints() < 1) {
-        QMessageBox::critical(this, "Error",
-                              "Không thể đọc DICOM từ:\n" + dirPath +
-                                  "\n\nKiểm tra thư mục có chứa file .dcm không.");
-        return;
-    }
-
-    // ============================================================
-    // 2. Tính Window/Level từ range thực tế
-    //    MicroDicom báo WL=2373 WW=4746 → dùng làm chuẩn
-    // ============================================================
-    double range[2];
-    volumeData->GetScalarRange(range);
-    qDebug() << "Data Range:" << range[0] << "to" << range[1];
-
-    double window, level;
-    double span = range[1] - range[0];
-    if (span < 500) {
-        // 8-bit hoặc dải hẹp
-        window = span;
-        level  = (range[0] + range[1]) / 2.0;
-    } else {
-        // 16-bit DICOM: dùng WW/WL chuẩn lấy từ MicroDicom
-        window = 4746.0;
-        level  = 2373.0;
-    }
-    qDebug() << "Window:" << window << "Level:" << level;
-
-    // ============================================================
-    // 3. Clear và thiết lập lại renderers
-    // ============================================================
-    clear3DModel();
-    clear2DTexture();
-    clearPointCloud();
-    renderer->RemoveAllViewProps();
-
-    if (!axialRenderer)    axialRenderer    = vtkSmartPointer<vtkRenderer>::New();
-    if (!sagittalRenderer) sagittalRenderer = vtkSmartPointer<vtkRenderer>::New();
-    if (!coronalRenderer)  coronalRenderer  = vtkSmartPointer<vtkRenderer>::New();
-
-    axialRenderer->RemoveAllViewProps();
-    sagittalRenderer->RemoveAllViewProps();
-    coronalRenderer->RemoveAllViewProps();
-
-    // Viewport layout 2x2:
-    //  [Axial    | Sagittal]
-    //  [Coronal  | 3D View ]
-    axialRenderer->SetViewport   (0.0, 0.5, 0.5, 1.0);
-    sagittalRenderer->SetViewport(0.5, 0.5, 1.0, 1.0);
-    coronalRenderer->SetViewport (0.0, 0.0, 0.5, 0.5);
-    renderer->SetViewport        (0.5, 0.0, 1.0, 0.5);
-
-    axialRenderer->SetBackground   (0, 0, 0);
-    sagittalRenderer->SetBackground(0, 0, 0);
-    coronalRenderer->SetBackground (0, 0, 0);
-    renderer->SetBackground        (0, 0, 0);
-
-    vtkWidget->renderWindow()->AddRenderer(axialRenderer);
-    vtkWidget->renderWindow()->AddRenderer(sagittalRenderer);
-    vtkWidget->renderWindow()->AddRenderer(coronalRenderer);
-
-    // ============================================================
-    // 4. Nhãn tiêu đề
-    // ============================================================
-    auto createTitle = [&](vtkRenderer* ren, const QString &text) {
-        vtkNew<vtkCornerAnnotation> anno;
-        anno->SetText(2, text.toStdString().c_str());
-        anno->GetTextProperty()->SetColor(0, 1, 0);
-        anno->GetTextProperty()->SetFontSize(18);
-        ren->AddViewProp(anno);
-    };
-    createTitle(axialRenderer,    "Axial");
-    createTitle(sagittalRenderer, "Sagittal");
-    createTitle(coronalRenderer,  "Coronal");
-    createTitle(renderer,         "3D View");
-
-    // ============================================================
-    // 5. Đường ngăn cách
-    // ============================================================
-    auto addBorder = [&](vtkRenderer* ren, bool right, bool bottom) {
-        auto makeLine = [&](double x1, double y1, double x2, double y2) {
-            vtkNew<vtkLineSource> line;
-            line->SetPoint1(x1, y1, 0);
-            line->SetPoint2(x2, y2, 0);
-            vtkNew<vtkCoordinate> coord;
-            coord->SetCoordinateSystemToNormalizedViewport();
-            vtkNew<vtkPolyDataMapper2D> m;
-            m->SetInputConnection(line->GetOutputPort());
-            m->SetTransformCoordinate(coord);
-            vtkNew<vtkActor2D> a;
-            a->SetMapper(m);
-            a->GetProperty()->SetColor(1.0, 1.0, 0.0);
-            a->GetProperty()->SetLineWidth(3.0);
-            ren->AddActor(a);
-        };
-        if (right)  makeLine(1.0, 0.0, 1.0, 1.0);
-        if (bottom) makeLine(0.0, 0.0, 1.0, 0.0);
-    };
-    addBorder(axialRenderer,    true,  true);
-    addBorder(sagittalRenderer, false, true);
-    addBorder(coronalRenderer,  true,  false);
-
-    // ============================================================
-    // 6. MPR slices – handled by CrosshairManager (step 8b below)
-    //    CrosshairManager::buildOverlay() adds its own vtkImageActor
-    //    (backed by vtkImageReslice) to each renderer, so we must NOT
-    //    add a second actor here – that would cause the ghost/duplicate
-    //    image artifact when the crosshair updates a view's slice.
-    // ============================================================
-
-    // ============================================================
-    // 7. Volume 3D
-    // ============================================================
-    renderer->AddViewProp(DicomLoader::createVolume(volumeData, range));
-
-    // ============================================================
-    // 8. Camera setup (direction only – ResetCamera for MPR views
-    //    is deferred until AFTER CrosshairManager adds its image
-    //    actors, so the camera fits the actual resliced image.)
-    // ============================================================
-    double center[3];
-    volumeData->GetCenter(center);
-    double bounds[6];
-    volumeData->GetBounds(bounds);
-    double maxDim = std::max({bounds[1]-bounds[0],
-                              bounds[3]-bounds[2],
-                              bounds[5]-bounds[4]});
-
-    // Helper: set camera direction & projection mode only (no ResetCamera yet)
-    auto setCamDir = [&](vtkRenderer* ren,
-                         double nx, double ny, double nz,
-                         double ux, double uy, double uz) {
-        vtkCamera* cam = ren->GetActiveCamera();
-        cam->SetFocalPoint(center[0], center[1], center[2]);
-        double dist = maxDim * 2.0;
-        cam->SetPosition(center[0]+nx*dist, center[1]+ny*dist, center[2]+nz*dist);
-        cam->SetViewUp(ux, uy, uz);
-        cam->ParallelProjectionOn();
-        // NOTE: ResetCamera() is called AFTER CrosshairManager::initialize()
-        //       so that it fits to the actual image actors.
-    };
-
-    setCamDir(axialRenderer,     0,  0,  1,  0, -1,  0);  // Nhìn Z+, Up là Y- (Anterior)
-    setCamDir(sagittalRenderer,  0,  0,  1,  0,  1,  0);  // Nhìn Z+, Up là Y+
-    setCamDir(coronalRenderer,   0,  0,  1,  0,  1,  0);  // Nhìn Z+, Up là Y+
-
-    // 3D renderer camera (has actors already from createVolume, safe to reset now)
-    {
-        vtkCamera* cam = renderer->GetActiveCamera();
-        cam->SetFocalPoint(center[0], center[1], center[2]);
-        cam->SetPosition(center[0]+maxDim*1.5,
-                         center[1]-maxDim*1.5,
-                         center[2]+maxDim*1.5);
-        cam->SetViewUp(0, 0, 1);
-        cam->ParallelProjectionOff();
-        renderer->ResetCamera();
-    }
-
-    // ── 8b. Khởi tạo Crosshair ─────────────────────────────────────────────
-    //  initialize() calls buildOverlay() which adds a vtkImageActor (backed
-    //  by vtkImageReslice) to each MPR renderer, then calls updateAllViews().
-    if (m_crosshair) {
-        m_crosshair->cleanup();
-        delete m_crosshair;
-        m_crosshair = nullptr;
-    }
-    m_crosshair = new CrosshairManager(this);
-    m_crosshair->initialize(
-        volumeData,
-        sagittalRenderer,
-        coronalRenderer,
-        axialRenderer,
-        vtkWidget->renderWindow(),
-        window, level
-        );
-
-    // NOW reset cameras for MPR renderers – image actors are present.
-    axialRenderer->ResetCamera();
-    sagittalRenderer->ResetCamera();
-    coronalRenderer->ResetCamera();
-
-    {
-        vtkRenderWindowInteractor *interactor =
-            vtkWidget->renderWindow()->GetInteractor();
-        if (!interactor) {
-            interactor = vtkRenderWindowInteractor::New();
-            vtkWidget->renderWindow()->SetInteractor(interactor);
-            interactor->Initialize();
-        }
-        m_crosshairStyle =
-            vtkSmartPointer<CrosshairInteractorStyle>::New();
-        m_crosshairStyle->manager    = m_crosshair;
-        m_crosshairStyle->renderer3D = renderer; // 3D viewport: left-drag rotates
-        interactor->SetInteractorStyle(m_crosshairStyle);
-    }
-
-    // ============================================================
-    // 9. Render
-    // ============================================================
-    vtkWidget->renderWindow()->Render();
-
-    // Lưu lastUsedPath
-    QString configPath = QApplication::applicationDirPath() + "/config.ini";
-    if (!QFile::exists(configPath))
-        configPath = QFileInfo(__FILE__).absolutePath() + "/config.ini";
-    QSettings settings(configPath, QSettings::IniFormat);
-    settings.setValue("Paths/lastUsedPath", lastUsedPath);
-
-    int* ext = volumeData->GetExtent();
-    QMessageBox::information(this, "DICOM Loaded",
-                             QString("✅ Loaded volume: %1 × %2 × %3 slices\nRange: %4 – %5\nW: %6 / L: %7")
-                                 .arg(ext[1]-ext[0]+1).arg(ext[3]-ext[2]+1).arg(ext[5]-ext[4]+1)
-                                 .arg((int)range[0]).arg((int)range[1])
-                                 .arg((int)window).arg((int)level));
-}
-
 void MainWindow::onHideAIResults() {
-    currentAIMode = AIMode::None;
-    if (!current2DImagePath.isEmpty()) {
-        clear2DTexture();
-        texturePlaneActor = Image2DLoader::load(current2DImagePath);
-        if (texturePlaneActor) {
-            renderer->AddActor(texturePlaneActor);
-            vtkWidget->renderWindow()->Render();
-        }
-    }
+    currentAIMode = AIMode::None; if (!current2DImagePath.isEmpty()) { clear2DTexture(); texturePlaneActor = Image2DLoader::load(current2DImagePath); if (texturePlaneActor) { renderer->AddActor(texturePlaneActor); vtkWidget->renderWindow()->Render(); } }
     updateMenuStates();
 }
-
+void MainWindow::setupChatbotUI() {
+    chatbotDock = new QDockWidget("AI Assistant", this); QWidget* dw = new QWidget(chatbotDock); QVBoxLayout* dl = new QVBoxLayout(dw);
+    dl->setContentsMargins(10, 10, 10, 10); dl->setSpacing(10); QHBoxLayout* tl = new QHBoxLayout();
+    modelSelector = new QComboBox(dw); modelSelector->addItem("Qwen2.5-3B-Instruct (Q4_K_M)"); modelSelector->addItem("Qwen2.5-3B-Instruct (Q8_0)"); modelSelector->addItem("Qwen2.5-7B-Instruct (Q4_K_M)");
+    modelSelector->setCurrentIndex(QSettings(QFileInfo(__FILE__).absolutePath() + "/../Config/Config.ini", QSettings::IniFormat).value("AI/chatbot_model_index", 0).toInt());
+    connect(modelSelector, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onModelSelected);
+    tl->addWidget(modelSelector); btnNewChat = new QPushButton("New Chat", dw); connect(btnNewChat, &QPushButton::clicked, this, &MainWindow::onNewChat); tl->addWidget(btnNewChat);
+    chatHistory = new QTextBrowser(dw); chatHistory->setHtml("<b>AI Assistant:</b> Chào bạn!"); chatHistory->setStyleSheet("background-color: #1e1e1e; color: #ffffff;");
+    QHBoxLayout* il = new QHBoxLayout(); chatInput = new QLineEdit(dw); btnSendChat = new QPushButton("Gửi", dw); btnSendChat->setFixedSize(40, 40); il->addWidget(chatInput); il->addWidget(btnSendChat);
+    dl->addLayout(tl); dl->addWidget(chatHistory); dl->addLayout(il); chatbotDock->setWidget(dw); addDockWidget(Qt::RightDockWidgetArea, chatbotDock); chatbotDock->hide();
+    connect(btnSendChat, &QPushButton::clicked, this, &MainWindow::onSendChatMessage); connect(chatInput, &QLineEdit::returnPressed, this, &MainWindow::onSendChatMessage);
+    chatHistory->setOpenLinks(false); connect(chatHistory, &QTextBrowser::anchorClicked, this, &MainWindow::onChatLinkClicked);
+}
+void MainWindow::onToggleChatbot() { if (chatbotDock->isHidden()) { chatbotDock->show(); if (!aiAssistant->isServerRunning()) aiAssistant->startServer(modelSelector->currentIndex()); } else chatbotDock->hide(); }
+void MainWindow::onModelSelected(int index) { QSettings(QFileInfo(__FILE__).absolutePath() + "/../Config/Config.ini", QSettings::IniFormat).setValue("AI/chatbot_model_index", index); aiAssistant->startServer(index); }
+void MainWindow::onAssistantStatusChanged(const QString &status) {
+    QString h = chatHistory->toHtml();
+    if (status == "Server AI đã sẵn sàng") h.replace("Đang khởi động Server...", "<font color='#00A36C'><b>" + status + "</b></font>");
+    else chatHistory->append("<i>" + status + "</i>");
+    if (status == "Server AI đã sẵn sàng") chatHistory->setHtml(h);
+    chatHistory->moveCursor(QTextCursor::End);
+}
+void MainWindow::onAssistantError(const QString &error) { chatHistory->append("<font color='red'>" + error + "</font>"); }
+void MainWindow::onSendChatMessage() { QString tx = chatInput->text().trimmed(); if (tx.isEmpty()) return; chatInput->clear(); aiAssistant->sendMessage(tx); btnSendChat->setEnabled(false); }
+void MainWindow::updateChatUI() {
+    btnSendChat->setEnabled(!aiAssistant->isThinking());
+    chatHistory->clear(); 
+    QString h = "<style>.msg { margin-bottom: 12px; padding: 8px; border-radius: 8px; }.user { background-color: #2b2d31; }.ai { background-color: #383a40; }.header { font-size: 11px; margin-bottom: 4px; display: flex; }.time { color: #888; font-size: 10px; margin-left: 10px; }.del { color: #ff4d4d; text-decoration: none; font-size: 10px; margin-left: auto; }.typing { color: #00A36C; font-style: italic; font-size: 12px; padding: 10px; }</style>";
+    h += "<b>AI Assistant:</b> Chào bạn!<br><br>";
+    auto history = aiAssistant->getHistory();
+    for (int i = 0; i < history.size(); ++i) {
+        QJsonObject m = history[i]; QString r = m["role"].toString();
+        h += QString("<div class='msg %1'><div class='header'><b style='color: %2;'>%3</b><span class='time'>%4</span><a href='delete_%5' class='del'>[Xóa]</a></div><div class='content'>%6</div></div>")
+             .arg((r == "user") ? "user" : "ai").arg((r == "user") ? "#0078D7" : "#00A36C").arg((r == "user") ? "Bạn" : "AI Assistant").arg(m["timestamp"].toString()).arg(i).arg(m["content"].toString());
+    }
+    if (aiAssistant->isThinking()) h += "<div class='typing'>AI đang suy nghĩ...</div>";
+    chatHistory->setHtml(h);
+    QTimer::singleShot(50, this, [this]() { chatHistory->verticalScrollBar()->setValue(chatHistory->verticalScrollBar()->maximum()); });
+}
+void MainWindow::onNewChat() { aiAssistant->newChat(); }
+void MainWindow::onChatLinkClicked(const QUrl &url) {
+    QString link = url.toString(); if (link.startsWith("delete_")) { int index = link.mid(7).toInt(); auto history = aiAssistant->getHistory(); if (index >= 0 && index < history.size()) { /* Logic xóa tin nhắn cụ thể cần thêm method vào AIAssistant nếu muốn, tạm thời gọi newChat hoặc ignore */ } }
+}
+void MainWindow::onLoadDicom() {
+    QString fn = QFileDialog::getOpenFileName(this, "Select DICOM", lastUsedPath); if (fn.isEmpty()) return;
+    lastUsedPath = QFileInfo(fn).absolutePath(); auto vd = DicomLoader::loadSeries(lastUsedPath); if (!vd || vd->GetNumberOfPoints() < 1) return;
+    double r[2]; vd->GetScalarRange(r); clear3DModel(); clear2DTexture(); clearPointCloud(); renderer->RemoveAllViewProps();
+    if (!axialRenderer) axialRenderer = vtkSmartPointer<vtkRenderer>::New(); if (!sagittalRenderer) sagittalRenderer = vtkSmartPointer<vtkRenderer>::New(); if (!coronalRenderer) coronalRenderer = vtkSmartPointer<vtkRenderer>::New();
+    axialRenderer->SetViewport(0.0, 0.5, 0.5, 1.0); sagittalRenderer->SetViewport(0.5, 0.5, 1.0, 1.0); coronalRenderer->SetViewport(0.0, 0.0, 0.5, 0.5); renderer->SetViewport(0.5, 0.0, 1.0, 0.5);
+    axialRenderer->SetBackground(0, 0, 0); sagittalRenderer->SetBackground(0, 0, 0); coronalRenderer->SetBackground(0, 0, 0); renderer->SetBackground(0, 0, 0);
+    vtkWidget->renderWindow()->AddRenderer(axialRenderer); vtkWidget->renderWindow()->AddRenderer(sagittalRenderer); vtkWidget->renderWindow()->AddRenderer(coronalRenderer);
+    auto addTitle = [](vtkRenderer* ren, const char* text) { vtkNew<vtkCornerAnnotation> ann; ann->SetText(2, text); ann->GetTextProperty()->SetColor(0.0, 1.0, 0.0); ann->GetTextProperty()->SetFontSize(16); ren->AddViewProp(ann); };
+    addTitle(axialRenderer, "Axial"); addTitle(sagittalRenderer, "Sagittal"); addTitle(coronalRenderer, "Coronal"); addTitle(renderer, "3D View");
+    renderer->AddViewProp(DicomLoader::createVolume(vd, r)); if (m_crosshair) { m_crosshair->cleanup(); delete m_crosshair; }
+    m_crosshair = new CrosshairManager(this); m_crosshair->initialize(vd, sagittalRenderer, coronalRenderer, axialRenderer, vtkWidget->renderWindow(), 4746.0, 2373.0);
+    auto style = vtkSmartPointer<CrosshairInteractorStyle>::New(); style->manager = m_crosshair; style->renderer3D = renderer; m_crosshairStyle = style;
+    vtkWidget->renderWindow()->GetInteractor()->SetInteractorStyle(m_crosshairStyle);
+    axialRenderer->ResetCamera(); sagittalRenderer->ResetCamera(); coronalRenderer->ResetCamera(); renderer->ResetCamera(); vtkWidget->renderWindow()->Render();
+}
 void MainWindow::setupNavigationUI() {
-    QWidget *navWidget = new QWidget(this);
-    QHBoxLayout *navLayout = new QHBoxLayout(navWidget);
-    
-    // Thu hẹp khoảng cách để vùng view lớn hơn
-    navLayout->setContentsMargins(5, 5, 5, 5);
-    navLayout->setSpacing(10);
-    navWidget->setFixedHeight(40); // Cố định chiều cao thanh điều hướng
-    
-    btnPrev = new QPushButton("Prev", this);
-    btnAutoPrev = new QPushButton("AutoPrev", this);
-    btnAutoNext = new QPushButton("AutoNext", this);
-    btnNext = new QPushButton("Next", this);
-    
-    btnPrev->setEnabled(false);
-    btnAutoPrev->setEnabled(false);
-    btnAutoNext->setEnabled(false);
-    btnNext->setEnabled(false);
-    
-    // Styling buttons to indicate state later
-    btnAutoPrev->setCheckable(true);
-    btnAutoNext->setCheckable(true);
-
-    navLayout->addStretch(); 
-    navLayout->addWidget(btnPrev);
-    navLayout->addWidget(btnAutoPrev);
-    navLayout->addWidget(btnAutoNext);
-    navLayout->addWidget(btnNext);
-    navLayout->addStretch();
-    
-    qobject_cast<QVBoxLayout*>(centralWidget()->layout())->addWidget(navWidget);
-    
-    connect(btnPrev, &QPushButton::clicked, this, &MainWindow::onPrevImage);
-    connect(btnNext, &QPushButton::clicked, this, &MainWindow::onNextImage);
-    connect(btnAutoPrev, &QPushButton::clicked, this, &MainWindow::onAutoPrev);
-    connect(btnAutoNext, &QPushButton::clicked, this, &MainWindow::onAutoNext);
+    QWidget *nw = new QWidget(this); QHBoxLayout *nl = new QHBoxLayout(nw); nw->setFixedHeight(40);
+    btnPrev = new QPushButton("Prev", this); btnAutoPrev = new QPushButton("AutoPrev", this); btnAutoNext = new QPushButton("AutoNext", this); btnNext = new QPushButton("Next", this);
+    btnAutoPrev->setCheckable(true); btnAutoNext->setCheckable(true);
+    nl->addStretch(); nl->addWidget(btnPrev); nl->addWidget(btnAutoPrev); nl->addWidget(btnAutoNext); nl->addWidget(btnNext); nl->addStretch();
+    qobject_cast<QVBoxLayout*>(centralWidget()->layout())->addWidget(nw);
+    connect(btnPrev, &QPushButton::clicked, this, &MainWindow::onPrevImage); connect(btnNext, &QPushButton::clicked, this, &MainWindow::onNextImage);
+    connect(btnAutoPrev, &QPushButton::clicked, this, &MainWindow::onAutoPrev); connect(btnAutoNext, &QPushButton::clicked, this, &MainWindow::onAutoNext);
 }
-
-void MainWindow::onNextImage() {
-    if (currentImageIndex < imageFileList.size() - 1) {
-        currentImageIndex++;
-        loadCurrentIndexImage();
-    }
-}
-
-void MainWindow::onPrevImage() {
-    if (currentImageIndex > 0) {
-        currentImageIndex--;
-        loadCurrentIndexImage();
-    }
-}
-
+void MainWindow::onNextImage() { if (currentImageIndex < imageFileList.size() - 1) { currentImageIndex++; loadCurrentIndexImage(); } }
+void MainWindow::onPrevImage() { if (currentImageIndex > 0) { currentImageIndex--; loadCurrentIndexImage(); } }
 void MainWindow::loadCurrentIndexImage() {
-    QString folder = QFileInfo(current2DImagePath).absolutePath();
-    QString newPath = folder + "/" + imageFileList[currentImageIndex];
-    current2DImagePath = newPath;
-    
-    clear2DTexture();
-    texturePlaneActor = Image2DLoader::load(newPath);
-    if (texturePlaneActor) {
-        renderer->AddActor(texturePlaneActor);
-        
-        if (currentAIMode == AIMode::Detection) onObjectDetection();
-        else if (currentAIMode == AIMode::Segmentation) onSegmentation();
-        
-        vtkWidget->renderWindow()->Render();
-    }
+    current2DImagePath = QFileInfo(current2DImagePath).absolutePath() + "/" + imageFileList[currentImageIndex];
+    clear2DTexture(); texturePlaneActor = Image2DLoader::load(current2DImagePath);
+    if (texturePlaneActor) { renderer->AddActor(texturePlaneActor); if (currentAIMode == AIMode::Detection) onObjectDetection(); else if (currentAIMode == AIMode::Segmentation) onSegmentation(); vtkWidget->renderWindow()->Render(); }
     updateNavigationButtons();
 }
-
-void MainWindow::onAutoNext() {
-    if (autoTimer->isActive() && isAutoNext) {
-        autoTimer->stop();
-        btnAutoNext->setChecked(false);
-    } else {
-        isAutoNext = true;
-        autoTimer->start(500); // 500ms per image
-        btnAutoNext->setChecked(true);
-        btnAutoPrev->setChecked(false);
-    }
-}
-
-void MainWindow::onAutoPrev() {
-    if (autoTimer->isActive() && !isAutoNext) {
-        autoTimer->stop();
-        btnAutoPrev->setChecked(false);
-    } else {
-        isAutoNext = false;
-        autoTimer->start(500);
-        btnAutoPrev->setChecked(true);
-        btnAutoNext->setChecked(false);
-    }
-}
-
+void MainWindow::onAutoNext() { if (autoTimer->isActive() && isAutoNext) { autoTimer->stop(); btnAutoNext->setChecked(false); } else { isAutoNext = true; autoTimer->start(500); btnAutoNext->setChecked(true); btnAutoPrev->setChecked(false); } }
+void MainWindow::onAutoPrev() { if (autoTimer->isActive() && !isAutoNext) { autoTimer->stop(); btnAutoPrev->setChecked(false); } else { isAutoNext = false; autoTimer->start(500); btnAutoPrev->setChecked(true); btnAutoNext->setChecked(false); } }
 void MainWindow::onAutoTimerTimeout() {
-    if (isAutoNext) {
-        if (currentImageIndex < imageFileList.size() - 1) {
-            onNextImage();
-        } else {
-            autoTimer->stop();
-            btnAutoNext->setChecked(false);
-        }
-    } else {
-        if (currentImageIndex > 0) {
-            onPrevImage();
-        } else {
-            autoTimer->stop();
-            btnAutoPrev->setChecked(false);
-        }
-    }
+    if (isAutoNext) { if (currentImageIndex < imageFileList.size() - 1) onNextImage(); else { autoTimer->stop(); btnAutoNext->setChecked(false); } }
+    else { if (currentImageIndex > 0) onPrevImage(); else { autoTimer->stop(); btnAutoPrev->setChecked(false); } }
 }
-
-void MainWindow::updateNavigationButtons() {
-    bool hasImages = !imageFileList.isEmpty();
-    btnPrev->setEnabled(currentImageIndex > 0);
-    btnNext->setEnabled(currentImageIndex >= 0 && currentImageIndex < imageFileList.size() - 1);
-    btnAutoPrev->setEnabled(hasImages);
-    btnAutoNext->setEnabled(hasImages);
-    
-    if (currentImageIndex <= 0 && !isAutoNext) {
-        autoTimer->stop();
-        btnAutoPrev->setChecked(false);
-    }
-    if (currentImageIndex >= imageFileList.size() - 1 && isAutoNext) {
-        autoTimer->stop();
-        btnAutoNext->setChecked(false);
-    }
-}
-
+void MainWindow::updateNavigationButtons() { btnPrev->setEnabled(currentImageIndex > 0); btnNext->setEnabled(currentImageIndex >= 0 && currentImageIndex < imageFileList.size() - 1); }
 void MainWindow::updateMenuStates() {
-    actShowCloud->setEnabled(!pointCloudVisible);
-    actHideCloud->setEnabled(pointCloudVisible);
-    
-    actRunDet->setEnabled(currentAIMode != AIMode::Detection);
-    actHideDet->setEnabled(currentAIMode == AIMode::Detection);
-    
-    actRunSeg->setEnabled(currentAIMode != AIMode::Segmentation);
-    actHideSeg->setEnabled(currentAIMode == AIMode::Segmentation);
+    actShowCloud->setEnabled(!pointCloudVisible); actHideCloud->setEnabled(pointCloudVisible);
+    actRunDet->setEnabled(currentAIMode != AIMode::Detection); actHideDet->setEnabled(currentAIMode == AIMode::Detection);
+    actRunSeg->setEnabled(currentAIMode != AIMode::Segmentation); actHideSeg->setEnabled(currentAIMode == AIMode::Segmentation);
 }

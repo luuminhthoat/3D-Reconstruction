@@ -2,28 +2,40 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
-#include <QVTKOpenGLNativeWidget.h>
 #include <vtkSmartPointer.h>
 #include <vtkRenderer.h>
-#include <vtkActor.h>
-#include <vector>
-#include <QProgressDialog>
+#include <vtkGenericOpenGLRenderWindow.h>
+#include <QVTKOpenGLNativeWidget.h>
+#include <QPushButton>
 #include <QProgressBar>
-#include "CrosshairManager.h"
+#include <QProgressDialog>
+#include <QTimer>
+#include <QComboBox>
+#include <QList>
+#include <QJsonObject>
+#include <QDockWidget>
+#include <QTextBrowser>
+#include <QLineEdit>
 
 class ReconstructionPipeline;
 class AIProcessor;
-class Image2DLoader;
-class Model3DLoader;
-class QPushButton;
-class QAction;
+class AIAssistant;
+class CrosshairManager;
+class CrosshairInteractorStyle;
+class PanStyle;
+class vtkActor;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
 QT_END_NAMESPACE
 
-class MainWindow : public QMainWindow
-{
+enum class AIMode {
+    None,
+    Detection,
+    Segmentation
+};
+
+class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
@@ -39,8 +51,6 @@ private slots:
     void onHidePointCloud();
     void onNextImage();
     void onPrevImage();
-    
-    // AI Phase 4 slots
     void onTrainModel();
     void onObjectDetection();
     void onSegmentation();
@@ -49,38 +59,46 @@ private slots:
     void onAutoPrev();
     void onAutoTimerTimeout();
     void onLoadDicom();
+    
+    // Chatbot UI Slots
+    void onToggleChatbot();
+    void onSendChatMessage();
+    void onModelSelected(int index);
+    void onNewChat();
+    void onChatLinkClicked(const QUrl &url);
+    void updateChatUI();
+    void onAssistantStatusChanged(const QString &status);
+    void onAssistantError(const QString &error);
 
 private:
-    void loadOBJwithMTL(const QString &objPath, const QString &mtlPath);
-    void clear3DModel();
-    void clear2DTexture();
-    void clearPointCloud();
-
     Ui::MainWindow *ui;
     QVTKOpenGLNativeWidget *vtkWidget;
-    vtkSmartPointer<vtkRenderer> renderer; // 3D/Main
+    vtkSmartPointer<vtkRenderer> renderer;
+    
     vtkSmartPointer<vtkRenderer> axialRenderer;
     vtkSmartPointer<vtkRenderer> sagittalRenderer;
     vtkSmartPointer<vtkRenderer> coronalRenderer;
-    vtkSmartPointer<vtkRenderer> uiRenderer; // Renderer cho đường kẻ và nhãn
 
-    std::vector<vtkSmartPointer<vtkActor>> modelActors;
-    vtkSmartPointer<vtkActor> texturePlaneActor;
-    vtkSmartPointer<vtkActor> cloudActor;
-
-    CrosshairManager*                         m_crosshair = nullptr;
+    CrosshairManager *m_crosshair = nullptr;
     vtkSmartPointer<CrosshairInteractorStyle> m_crosshairStyle;
 
     ReconstructionPipeline *reconstruction;
     AIProcessor *aiProcessor;
-    bool pointCloudVisible;
+    AIAssistant *aiAssistant;
 
-    QProgressDialog *progressDialog;
-    QProgressBar *progressBar;
+    vtkSmartPointer<vtkActor> cloudActor;
+    std::vector<vtkSmartPointer<vtkActor>> modelActors;
+    vtkSmartPointer<vtkActor> texturePlaneActor;
+
+    bool pointCloudVisible;
     QString lastUsedPath;
     QString current2DImagePath;
+    QStringList imageFileList;
+    int currentImageIndex;
+    
+    QProgressDialog *progressDialog;
+    QProgressBar *progressBar;
 
-    // Menu Actions for toggling
     QAction *actShowCloud;
     QAction *actHideCloud;
     QAction *actRunDet;
@@ -88,27 +106,30 @@ private:
     QAction *actRunSeg;
     QAction *actHideSeg;
 
-    // Navigation
-    QPushButton *btnPrev;
-    QPushButton *btnNext;
-    QPushButton *btnAutoPrev;
-    QPushButton *btnAutoNext;
-    QTimer *autoTimer;
-    bool isAutoNext; 
-    QStringList imageFileList;
-    int currentImageIndex;
-
-    enum class AIMode { None, Detection, Segmentation };
     AIMode currentAIMode;
+    
+    QTimer *autoTimer;
+    bool isAutoNext;
+    QPushButton *btnPrev, *btnNext, *btnAutoPrev, *btnAutoNext;
 
+    void loadOBJwithMTL(const QString &objPath, const QString &mtlPath);
+    void clear3DModel();
+    void clear2DTexture();
+    void clearPointCloud();
+    void resetToSingleRenderer();
+    void setupNavigationUI();
     void updateMenuStates();
     void updateNavigationButtons();
     void loadCurrentIndexImage();
-    void setupNavigationUI();
 
-    // Restore the render window to single full-screen renderer.
-    // Call before loading non-DICOM content (2D image, 3D model, point cloud).
-    void resetToSingleRenderer();
+    // Chatbot UI
+    void setupChatbotUI();
+    QDockWidget* chatbotDock;
+    QTextBrowser* chatHistory;
+    QLineEdit* chatInput;
+    QPushButton* btnSendChat;
+    QComboBox* modelSelector;
+    QPushButton* btnNewChat;
 };
 
-#endif
+#endif // MAINWINDOW_H
