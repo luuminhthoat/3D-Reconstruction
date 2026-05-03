@@ -105,6 +105,10 @@ private:
     void updateNavigationButtons();
     void loadCurrentIndexImage();
     void setupNavigationUI();
+
+    // Restore the render window to single full-screen renderer.
+    // Call before loading non-DICOM content (2D image, 3D model, point cloud).
+    void resetToSingleRenderer();
 };
 
 #endif

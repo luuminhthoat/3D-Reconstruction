@@ -138,7 +138,10 @@ public:
     static CrosshairInteractorStyle* New();
     vtkTypeMacro(CrosshairInteractorStyle, vtkInteractorStyleImage);
 
-    CrosshairManager* manager = nullptr;
+    CrosshairManager* manager    = nullptr;
+
+    // Set this to the 3D renderer so left-drag rotates the 3D view.
+    vtkRenderer*      renderer3D = nullptr;
 
     void OnLeftButtonDown()  override;
     void OnMouseMove()       override;
@@ -149,8 +152,13 @@ public:
     void OnMiddleButtonUp()  override { this->EndDolly();   }
 
 private:
-    int  detectView()     const; // returns ORI_* of the hovered viewport, or -1
-    int  m_activeView = -1;      // view being dragged (sticky)
+    int  detectView()   const; // returns ORI_* of the hovered viewport, or -1
+    bool isIn3DView(int x, int y) const; // true when cursor is in the 3D viewport
+
+    int  m_activeView  = -1;   // MPR view being crosshair-dragged (sticky)
+    bool m_rotating3D  = false;// true while left-dragging in the 3D viewport
+    int  m_lastX       = 0;
+    int  m_lastY       = 0;
 };
 
 #endif // CROSSHAIRMANAGER_H

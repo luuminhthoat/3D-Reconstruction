@@ -133,7 +133,7 @@ void CrosshairManager::cleanup()
         if (v.imageActor)  ren->RemoveActor(v.imageActor);
         if (v.hActor)      ren->RemoveActor(v.hActor);
         if (v.vActor)      ren->RemoveActor(v.vActor);
-        if (v.anchorActor) ren->RemoveActor(v.anchorActor);
+        // anchorActor is NOT in the renderer (hidden for hit-test only)
         for (int k = 0; k < 4; ++k)
             if (v.labels[k]) ren->RemoveActor(v.labels[k]);
 
@@ -245,7 +245,12 @@ void CrosshairManager::buildOverlay(int vi)
         ren->AddActor(v.labels[k]);
     }
 
-    // ── 4. Anchor sphere ─────────────────────────────────────────────────────
+    // ── 4. Anchor sphere (hidden – kept only for isNearAnchor hit-testing) ────
+    //    The sphere is in 3D world space, but the MPR cameras look at 2D reslice
+    //    output space, so the sphere would project at a wrong/random position on
+    //    screen and trigger VTK's red selection ring. We create the geometry so
+    //    that isNearAnchor() can measure its screen-space position via the
+    //    viewport transform, but we do NOT add it to the renderer.
     {
         v.anchorSource = vtkSmartPointer<vtkSphereSource>::New();
         v.anchorSource->SetThetaResolution(16);
@@ -256,11 +261,7 @@ void CrosshairManager::buildOverlay(int vi)
 
         v.anchorActor = vtkSmartPointer<vtkActor>::New();
         v.anchorActor->SetMapper(v.anchorMapper);
-        v.anchorActor->GetProperty()->SetColor(1.0, 1.0, 0.0);
-        v.anchorActor->GetProperty()->SetOpacity(0.95);
-        v.anchorActor->GetProperty()->SetAmbient(0.5);
-        v.anchorActor->GetProperty()->SetDiffuse(0.8);
-        ren->AddActor(v.anchorActor);
+        // Not added to renderer – invisible but used for hit-test geometry.
     }
 }
 
@@ -429,28 +430,70 @@ int CrosshairInteractorStyle::detectView() const
     return -1;
 }
 
+bool CrosshairInteractorStyle::isIn3DView(int x, int y) const
+{
+    if (!renderer3D || !Interactor) return false;
+    int *ws = Interactor->GetRenderWindow()->GetSize();
+    double fx = (double)x/ws[0], fy = (double)y/ws[1];
+    double vp[4]; renderer3D->GetViewport(vp);
+    return fx >= vp[0] && fx <= vp[2] && fy >= vp[1] && fy <= vp[3];
+}
+
 void CrosshairInteractorStyle::OnLeftButtonDown()
 {
+    int x = Interactor->GetEventPosition()[0];
+    int y = Interactor->GetEventPosition()[1];
+
     if (manager) {
         m_activeView = detectView();
         if (m_activeView >= 0) {
-            manager->onLeftButtonDown(m_activeView,
-                                      Interactor->GetEventPosition()[0],
-                                      Interactor->GetEventPosition()[1]);
+            manager->onLeftButtonDown(m_activeView, x, y);
             if (manager->isDragging(m_activeView)) return; // consumed
         }
     }
+
+    // Left-drag in the 3D viewport starts rotation
+    if (isIn3DView(x, y)) {
+        m_rotating3D = true;
+        m_lastX = x;
+        m_lastY = y;
+        return;
+    }
+
     Superclass::OnLeftButtonDown();
 }
 
 void CrosshairInteractorStyle::OnMouseMove()
 {
+    int x = Interactor->GetEventPosition()[0];
+    int y = Interactor->GetEventPosition()[1];
+
+    // Crosshair drag in MPR view
     if (manager && m_activeView >= 0 && manager->isDragging(m_activeView)) {
-        manager->onMouseMove(m_activeView,
-                             Interactor->GetEventPosition()[0],
-                             Interactor->GetEventPosition()[1]);
+        manager->onMouseMove(m_activeView, x, y);
         return; // consumed
     }
+
+    // Trackball rotation in 3D view
+    if (m_rotating3D && renderer3D) {
+        int dx = x - m_lastX;
+        int dy = y - m_lastY;
+        m_lastX = x;
+        m_lastY = y;
+
+        int *sz = Interactor->GetRenderWindow()->GetSize();
+        double azimuth   = -(double)dx / sz[0] * 360.0;
+        double elevation =  (double)dy / sz[1] * 360.0;
+
+        vtkCamera *cam = renderer3D->GetActiveCamera();
+        cam->Azimuth(azimuth);
+        cam->Elevation(elevation);
+        cam->OrthogonalizeViewUp();
+        renderer3D->ResetCameraClippingRange();
+        Interactor->GetRenderWindow()->Render();
+        return;
+    }
+
     Superclass::OnMouseMove();
 }
 
@@ -461,5 +504,11 @@ void CrosshairInteractorStyle::OnLeftButtonUp()
         m_activeView = -1;
         return;
     }
+
+    if (m_rotating3D) {
+        m_rotating3D = false;
+        return;
+    }
+
     Superclass::OnLeftButtonUp();
 }

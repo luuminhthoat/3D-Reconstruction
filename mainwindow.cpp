@@ -96,6 +96,53 @@ void MainWindow::loadOBJwithMTL(const QString &objPath, const QString &mtlPath) 
     vtkWidget->renderWindow()->Render();
 }
 
+// ------------------------------------------------------------------
+// resetToSingleRenderer
+//   Dismantles the 2x2 DICOM viewport layout and restores the main
+//   renderer to occupy the full render window. Call before loading
+//   non-DICOM content (2D image, 3D model, point cloud).
+// ------------------------------------------------------------------
+void MainWindow::resetToSingleRenderer()
+{
+    // Cleanup crosshair state & actors
+    if (m_crosshair) {
+        m_crosshair->cleanup();
+        delete m_crosshair;
+        m_crosshair = nullptr;
+    }
+    m_crosshairStyle = nullptr;
+
+    auto *rw = vtkWidget->renderWindow();
+
+    // Remove MPR renderers from the window
+    if (axialRenderer) {
+        axialRenderer->RemoveAllViewProps();
+        rw->RemoveRenderer(axialRenderer);
+        axialRenderer = nullptr;
+    }
+    if (sagittalRenderer) {
+        sagittalRenderer->RemoveAllViewProps();
+        rw->RemoveRenderer(sagittalRenderer);
+        sagittalRenderer = nullptr;
+    }
+    if (coronalRenderer) {
+        coronalRenderer->RemoveAllViewProps();
+        rw->RemoveRenderer(coronalRenderer);
+        coronalRenderer = nullptr;
+    }
+
+    // Restore main renderer to full screen
+    renderer->SetViewport(0.0, 0.0, 1.0, 1.0);
+    renderer->RemoveAllViewProps();
+
+    // Restore default interactor style (pan/zoom for 3D view)
+    vtkNew<PanStyle> style;
+    auto *interactor = rw->GetInteractor();
+    if (interactor) interactor->SetInteractorStyle(style);
+
+    renderer->SetBackground(0.1, 0.2, 0.4);
+    rw->Render();
+}
 
 // ------------------------------------------------------------------
 // Constructor & Destructor
@@ -266,6 +313,9 @@ void MainWindow::onLoad2DImages() {
   QSettings settings(configPath, QSettings::IniFormat);
   settings.setValue("Paths/lastUsedPath", lastUsedPath);
 
+  // Restore single-renderer layout if DICOM was previously loaded
+  resetToSingleRenderer();
+
   clear3DModel();
   clearPointCloud();
   clear2DTexture();
@@ -311,6 +361,10 @@ void MainWindow::onLoad3DImages() {
   clear3DModel();
   clearPointCloud();
   clear2DTexture();
+
+  // Restore single-renderer layout if DICOM was previously loaded
+  resetToSingleRenderer();
+
   loadOBJwithMTL(objFileName, mtlFileName);
 }
 
@@ -660,11 +714,12 @@ void MainWindow::onLoadDicom() {
     addBorder(coronalRenderer,  true,  false);
 
     // ============================================================
-    // 6. MPR slices
+    // 6. MPR slices – handled by CrosshairManager (step 8b below)
+    //    CrosshairManager::buildOverlay() adds its own vtkImageActor
+    //    (backed by vtkImageReslice) to each renderer, so we must NOT
+    //    add a second actor here – that would cause the ghost/duplicate
+    //    image artifact when the crosshair updates a view's slice.
     // ============================================================
-    axialRenderer->AddViewProp(DicomLoader::createSlice(volumeData, 2, window, level));
-    sagittalRenderer->AddViewProp(DicomLoader::createSlice(volumeData, 0, window, level));
-    coronalRenderer->AddViewProp (DicomLoader::createSlice(volumeData, 1, window, level));
 
     // ============================================================
     // 7. Volume 3D
@@ -672,7 +727,9 @@ void MainWindow::onLoadDicom() {
     renderer->AddViewProp(DicomLoader::createVolume(volumeData, range));
 
     // ============================================================
-    // 8. Camera setup
+    // 8. Camera setup (direction only – ResetCamera for MPR views
+    //    is deferred until AFTER CrosshairManager adds its image
+    //    actors, so the camera fits the actual resliced image.)
     // ============================================================
     double center[3];
     volumeData->GetCenter(center);
@@ -682,22 +739,25 @@ void MainWindow::onLoadDicom() {
                               bounds[3]-bounds[2],
                               bounds[5]-bounds[4]});
 
-    auto setupCam = [&](vtkRenderer* ren,
-                        double nx, double ny, double nz,
-                        double ux, double uy, double uz) {
+    // Helper: set camera direction & projection mode only (no ResetCamera yet)
+    auto setCamDir = [&](vtkRenderer* ren,
+                         double nx, double ny, double nz,
+                         double ux, double uy, double uz) {
         vtkCamera* cam = ren->GetActiveCamera();
         cam->SetFocalPoint(center[0], center[1], center[2]);
         double dist = maxDim * 2.0;
         cam->SetPosition(center[0]+nx*dist, center[1]+ny*dist, center[2]+nz*dist);
         cam->SetViewUp(ux, uy, uz);
         cam->ParallelProjectionOn();
-        ren->ResetCamera();
+        // NOTE: ResetCamera() is called AFTER CrosshairManager::initialize()
+        //       so that it fits to the actual image actors.
     };
 
-    setupCam(axialRenderer,     0,  0,  1,  0, -1,  0);  // Nhìn Z+, Up là Y- (Anterior) -> Giống IMAIOS
-    setupCam(sagittalRenderer,  0,  0,  1,  0,  1,  0);  // Nhìn Z+, Up là Y+ (Superior của ảnh reslice)
-    setupCam(coronalRenderer,   0,  0,  1,  0,  1,  0);  // Nhìn Z+, Up là Y+ (Superior của ảnh reslice)
+    setCamDir(axialRenderer,     0,  0,  1,  0, -1,  0);  // Nhìn Z+, Up là Y- (Anterior)
+    setCamDir(sagittalRenderer,  0,  0,  1,  0,  1,  0);  // Nhìn Z+, Up là Y+
+    setCamDir(coronalRenderer,   0,  0,  1,  0,  1,  0);  // Nhìn Z+, Up là Y+
 
+    // 3D renderer camera (has actors already from createVolume, safe to reset now)
     {
         vtkCamera* cam = renderer->GetActiveCamera();
         cam->SetFocalPoint(center[0], center[1], center[2]);
@@ -710,6 +770,8 @@ void MainWindow::onLoadDicom() {
     }
 
     // ── 8b. Khởi tạo Crosshair ─────────────────────────────────────────────
+    //  initialize() calls buildOverlay() which adds a vtkImageActor (backed
+    //  by vtkImageReslice) to each MPR renderer, then calls updateAllViews().
     if (m_crosshair) {
         m_crosshair->cleanup();
         delete m_crosshair;
@@ -725,6 +787,11 @@ void MainWindow::onLoadDicom() {
         window, level
         );
 
+    // NOW reset cameras for MPR renderers – image actors are present.
+    axialRenderer->ResetCamera();
+    sagittalRenderer->ResetCamera();
+    coronalRenderer->ResetCamera();
+
     {
         vtkRenderWindowInteractor *interactor =
             vtkWidget->renderWindow()->GetInteractor();
@@ -735,7 +802,8 @@ void MainWindow::onLoadDicom() {
         }
         m_crosshairStyle =
             vtkSmartPointer<CrosshairInteractorStyle>::New();
-        m_crosshairStyle->manager = m_crosshair;
+        m_crosshairStyle->manager    = m_crosshair;
+        m_crosshairStyle->renderer3D = renderer; // 3D viewport: left-drag rotates
         interactor->SetInteractorStyle(m_crosshairStyle);
     }
 
